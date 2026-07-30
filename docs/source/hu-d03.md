@@ -1,7 +1,9 @@
 # HU_D03 Integration
 
-This fork adds the first HU_D03 training milestone: lower-body velocity
-tracking with 12 leg joints plus waist roll and pitch.
+This fork adds two HU_D03 training milestones:
+
+- lower-body velocity tracking with 12 leg joints plus waist roll and pitch;
+- full-body recovery from cached supine, prone, and side-lying poses.
 
 For a reproducible new-machine setup and an agent-oriented execution
 checklist, read the repository-root
@@ -78,6 +80,47 @@ python scripts/eval.py \
   --num_envs 32 \
   --checkpoint /absolute/path/to/model.pt
 ```
+
+## Fallen-pose stand-up training
+
+`StandUp-HU-D03-v0` controls all 31 active joints and always tries to recover
+to a stable standing pose. It does not command the robot to fall or lie down.
+
+Before training, its `pre_learn` hook automatically builds and caches two
+fallen-state datasets:
+
+- a primary set with repeatable supine poses and default joint positions;
+- a secondary set with random root orientations, joint positions, and small
+  initial velocities, covering prone, side-lying, and irregular poses.
+
+Inspect the generated fallen states before learning:
+
+```bash
+python scripts/play.py \
+  --task StandUp-HU-D03-v0 \
+  --num_envs 16 \
+  --validate-fallen-states \
+  --num_steps 500
+```
+
+Run a short headless smoke training:
+
+```bash
+python scripts/train.py \
+  --task StandUp-HU-D03-v0 \
+  --num_envs 64 \
+  --max_iterations 10 \
+  --headless \
+  --logger tensorboard
+```
+
+The lift action applies an early-training upward assist capped at 90% of robot
+weight. Curriculum learning removes the assist and increases arbitrary fallen
+poses. A final policy is useful only after it succeeds without lift assistance.
+
+The first launch can take several minutes because it simulates and caches the
+fallen poses. Delete a cache only when intentionally changing the robot asset,
+terrain, or fallen-state configuration.
 
 ## Before sim-to-real
 

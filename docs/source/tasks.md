@@ -158,6 +158,7 @@ whole-body movements are essential for recovery.
 | Task ID | Robot | Controlled Joints | Commands | Observations |
 |---------|-------|-------------------|----------|--------------|
 | `StandUp-T1-v0` | Booster T1 | Full body (all joints) | None | History (5 steps) |
+| `StandUp-HU-D03-v0` | HU_D03 | Full body (31 joints) | None | History (5 steps) |
 
 **Key features**:
 
@@ -170,6 +171,9 @@ whole-body movements are essential for recovery.
   which is gradually removed via curriculum learning.
 - **`pre_learn` hook**: The fallen state collection runs automatically before training
   begins via a registered `pre_learn_entry_point`.
+- **HU_D03 staged poses**: HU_D03 starts with mostly supine states, then increases
+  arbitrary-orientation and randomized-joint resets to cover prone and side-lying
+  recovery as the terrain curriculum progresses.
 
 ```python
 # Configuration in agents/rsl_rl_ppo_cfg.py

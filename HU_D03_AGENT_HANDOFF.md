@@ -5,9 +5,9 @@
 > validation, and stop before any real-robot deployment.
 
 本文档用于在一台新的 Linux/NVIDIA GPU 机器上复现
-`Velocity-HU-D03-History-v0` 的仿真与训练环境。它描述的是当前分支已经完成的
-第一阶段：14-DoF 下肢速度跟踪（双腿 12 关节，加腰部 roll/pitch），不是全身动作
-模仿，也还不是可直接上真机的控制器。
+`Velocity-HU-D03-History-v0` 和 `StandUp-HU-D03-v0` 的仿真与训练环境。当前分支
+包含 14-DoF 下肢速度跟踪，以及从仰卧、俯卧、侧卧和随机倒地姿态恢复的 31-DoF
+全身起立任务；两者都还不是可直接上真机的控制器。
 
 ## 0. Agent 执行边界
 
@@ -268,8 +268,67 @@ python scripts/eval.py \
 - Environment：`agile/rl_env/tasks/locomotion/hu_d03/velocity_history_env_cfg.py`
 - PPO：`agile/rl_env/tasks/locomotion/hu_d03/agents/rsl_rl_ppo_cfg.py`
 - Task registration：`agile/rl_env/tasks/locomotion/hu_d03/__init__.py`
+- Stand-up environment：`agile/rl_env/tasks/stand_up/hu_d03/stand_up_env_cfg.py`
+- Stand-up PPO：`agile/rl_env/tasks/stand_up/hu_d03/agents/rsl_rl_ppo_cfg.py`
+- Fallen-state hook：`agile/rl_env/tasks/stand_up/hu_d03/pre_learn.py`
 - Asset validator：`scripts/validate_hu_d03_assets.py`
 - Human-readable integration notes：`docs/source/hu-d03.md`
 
 完成上述本地仿真训练只说明软件链路可用。进入 sim-to-MuJoCo 或 sim-to-real 前，
 仍需单独完成执行器辨识、并行连杆映射、状态/动作接口和硬件安全验证。
+
+## 10. 倒地起身任务
+
+`StandUp-HU-D03-v0` 的策略动作维度为 `31`，控制所有主动关节。它的目标是从倒地
+状态恢复并保持稳定站立，不包含“主动卧倒”命令。
+
+首次启动时，`pre_learn` 会自动生成并缓存两套倒地状态：
+
+- primary：仰卧、默认关节位置、零初速度；
+- secondary：随机方向、随机关节位置和小范围初速度，用于覆盖俯卧、左右侧卧与
+  非规则倒地姿态。
+
+先可视化检查倒地状态。远程无显示时可追加 `--headless`，但应保存视频或在有显示
+的机器上至少检查一次：
+
+```bash
+python scripts/play.py \
+  --task StandUp-HU-D03-v0 \
+  --num_envs 16 \
+  --validate-fallen-states \
+  --num_steps 500
+```
+
+检查动作维度为 `31`，并确认倒地状态没有穿地、关节爆炸或自碰撞锁死。然后做短
+训练：
+
+```bash
+python scripts/train.py \
+  --task StandUp-HU-D03-v0 \
+  --num_envs 64 \
+  --max_iterations 10 \
+  --headless \
+  --logger tensorboard
+```
+
+正式训练前按 `64 → 256 → 512/1024` 逐步扩大环境数：
+
+```bash
+python scripts/train.py \
+  --task StandUp-HU-D03-v0 \
+  --num_envs 1024 \
+  --headless \
+  --logger wandb \
+  --log_project_name StandUp-HU-D03
+```
+
+产物位于：
+
+```text
+logs/rsl_rl/stand_up_hu_d03/<timestamp>_stand_up_hu_d03/model_*.pt
+```
+
+成功标准不能只看机器人“被拉起来”。训练初期有最高 90% 自重的虚拟 lift assist；
+必须确认 `adaptive_lift` curriculum 已将 assist 降为 `0`，再分别统计仰卧、俯卧、
+左右侧卧的无辅助起立成功率。当前策略也不能直接上真机，因为倒地接触会显著放大
+尚未标定的碰撞、执行器和并行连杆误差。

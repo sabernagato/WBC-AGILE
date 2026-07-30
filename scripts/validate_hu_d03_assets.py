@@ -57,6 +57,32 @@ POLICY_JOINTS = {
 }
 POLICY_JOINTS.update({"waist_roll_joint", "waist_pitch_joint"})
 
+EXPECTED_STAND_UP_BODIES = {
+    "base_link",
+    "waist_pitch_link",
+    "head_pitch_link",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_hand_yaw_link",
+    "right_hand_yaw_link",
+}
+
+
+def _missing_bilateral_counterparts(names: set[str]) -> set[str]:
+    """Return missing left/right counterparts required by symmetry augmentation."""
+
+    missing: set[str] = set()
+    for name in names:
+        if "left" in name:
+            counterpart = name.replace("left", "right")
+        elif "right" in name:
+            counterpart = name.replace("right", "left")
+        else:
+            continue
+        if counterpart not in names:
+            missing.add(counterpart)
+    return missing
+
 
 def _default_description_root() -> Path:
     return (
@@ -92,6 +118,25 @@ def _validate_urdf(path: Path) -> tuple[list[str], list[str]]:
         errors.append(
             f"URDF active-joint mismatch: missing={sorted(EXPECTED_ACTIVE_JOINTS - active)}, "
             f"extra={sorted(active - EXPECTED_ACTIVE_JOINTS)}"
+        )
+    link_names = {link.attrib["name"] for link in root.findall("link")}
+    missing_joint_counterparts = _missing_bilateral_counterparts(active)
+    missing_link_counterparts = _missing_bilateral_counterparts(link_names)
+    if missing_joint_counterparts:
+        errors.append(
+            "URDF missing joint counterparts required by HU_D03 symmetry: "
+            f"{sorted(missing_joint_counterparts)}"
+        )
+    if missing_link_counterparts:
+        errors.append(
+            "URDF missing body counterparts required by HU_D03 symmetry: "
+            f"{sorted(missing_link_counterparts)}"
+        )
+    missing_stand_up_bodies = EXPECTED_STAND_UP_BODIES - link_names
+    if missing_stand_up_bodies:
+        errors.append(
+            "URDF missing bodies required by StandUp-HU-D03-v0: "
+            f"{sorted(missing_stand_up_bodies)}"
         )
     collision_count = len(root.findall("./link/collision"))
     if collision_count < 10:
@@ -162,6 +207,17 @@ def _validate_usd(path: Path) -> tuple[list[str], list[str]]:
     if not articulation_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
         errors.append("USD base_link does not have PhysicsArticulationRootAPI")
 
+    missing_stand_up_bodies = {
+        body_name
+        for body_name in EXPECTED_STAND_UP_BODIES
+        if not stage.GetPrimAtPath(f"{root.GetPath()}/{body_name}").IsValid()
+    }
+    if missing_stand_up_bodies:
+        errors.append(
+            "USD missing bodies required by StandUp-HU-D03-v0: "
+            f"{sorted(missing_stand_up_bodies)}"
+        )
+
     revolute_joints = {
         prim.GetName()
         for prim in stage.Traverse()
@@ -198,10 +254,17 @@ def _validate_usd_with_cli(path: Path) -> tuple[list[str], list[str]]:
     warnings: list[str] = [
         "Python pxr bindings are unavailable; USD structure was checked with usdcat."
     ]
+    base_path = path.parent / "configuration" / "HU_D03_03_base.usd"
     physics_path = path.parent / "configuration" / "HU_D03_03_physics.usd"
     try:
         root_result = subprocess.run(
             ["usdcat", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        base_result = subprocess.run(
+            ["usdcat", str(base_path)],
             check=True,
             capture_output=True,
             text=True,
@@ -218,11 +281,23 @@ def _validate_usd_with_cli(path: Path) -> tuple[list[str], list[str]]:
         return [f"usdcat failed for HU_D03 USD: {exc.stderr.strip()}"], warnings
 
     root_text = root_result.stdout
+    base_text = base_result.stdout
     physics_text = physics_result.stdout
     if 'defaultPrim = "HU_D03_03"' not in root_text:
         errors.append("USD root layer does not declare HU_D03_03 as defaultPrim")
     if "PhysicsArticulationRootAPI" not in physics_text:
         errors.append("USD physics layer has no PhysicsArticulationRootAPI")
+
+    missing_stand_up_bodies = {
+        body_name
+        for body_name in EXPECTED_STAND_UP_BODIES
+        if f'def Xform "{body_name}"' not in base_text
+    }
+    if missing_stand_up_bodies:
+        errors.append(
+            "USD missing bodies required by StandUp-HU-D03-v0: "
+            f"{sorted(missing_stand_up_bodies)}"
+        )
 
     revolute_joints = set(re.findall(r'def PhysicsRevoluteJoint "([^"]+)"', physics_text))
     if revolute_joints != EXPECTED_ACTIVE_JOINTS:

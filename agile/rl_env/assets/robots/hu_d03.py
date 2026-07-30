@@ -34,6 +34,7 @@ HU_D03_USD_PATH = os.environ.get(
 
 ROOT_BODY_NAME = "base_link"
 TORSO_BODY_NAME = "waist_pitch_link"
+HEAD_BODY_NAME = "head_pitch_link"
 
 LEG_JOINT_NAMES = [
     ".*_hip_.*_joint",
@@ -49,6 +50,20 @@ CONTROLLED_JOINT_NAMES = LEG_JOINT_NAMES + ["waist_roll_joint", "waist_pitch_joi
 
 FEET_LINK_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 DEFAULT_BASE_HEIGHT = 0.92
+DEFAULT_FEET_DISTANCE = 0.242
+
+# Contacts with these links are expected while recovering from a fall but are
+# penalized so the learned terminal pose prefers both feet on the ground.
+UNDESIRED_CONTACTS_LINKS = [
+    ROOT_BODY_NAME,
+    "waist_.*_link",
+    "head_.*_link",
+    ".*_hip_.*_link",
+    ".*_shoulder_.*_link",
+    ".*_elbow_link",
+    ".*_wrist_.*_link",
+    ".*_hand_yaw_link",
+]
 
 # Software limits from HU_D03_03.urdf. The higher saturation values represent
 # the preliminary hardware peak classes and are not validated continuous

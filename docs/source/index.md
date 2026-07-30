@@ -66,7 +66,7 @@ See {doc}`getting-started` for full installation and setup instructions.
 |----------|----------|-------------|
 | **Locomotion** | `Velocity-T1-v0`, `Velocity-G1-History-v0`, `Velocity-HU-D03-History-v0` | Lower-body velocity tracking on rough terrain |
 | **Locomotion + Height** | `Velocity-Height-G1-v0`, distillation variants | Lower-body velocity + height tracking with teacher-student distillation |
-| **Stand Up** | `StandUp-T1-v0` | Full-body recovery from fallen poses (unified whole-body policy) |
+| **Stand Up** | `StandUp-T1-v0`, `StandUp-HU-D03-v0` | Full-body recovery from fallen poses (unified whole-body policy) |
 | **Pick & Place** | `G1-PickPlace-Tracking-v0` | Upper-body trajectory tracking with frozen lower-body locomotion policy |
 | **Whole-Body Motion Tracking** | `Tracking-Flat-G1-v0` | Full-body motion imitation from reference trajectories (e.g., dancing) |
 | **Debug** | `Debug-G1-v0`, `Debug-T1-v0` | Interactive GUI environments for debugging |
