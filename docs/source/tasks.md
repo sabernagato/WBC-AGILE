@@ -90,6 +90,7 @@ the pick & place task freezes a trained locomotion policy and layers upper-body 
 |---------|-------|-------------------|----------|--------------|
 | `Velocity-T1-v0` | Booster T1 | Legs (12 joints) | Velocity (x, y, yaw) | History (5 steps) |
 | `Velocity-G1-History-v0` | Unitree G1 | Legs + Waist Roll/Pitch (14 joints) | Velocity (x, y, yaw) | History (5 steps) |
+| `Velocity-HU-D03-History-v0` | HU_D03 | Legs + Waist Roll/Pitch (14 joints) | Velocity (x, y, yaw) | History (5 steps) |
 
 Both robots use the **Delayed DC Motor** actuator model, which adds realistic communication
 delay between the policy output and joint actuation.
