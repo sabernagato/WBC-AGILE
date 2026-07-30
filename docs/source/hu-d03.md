@@ -1,9 +1,10 @@
 # HU_D03 Integration
 
-This fork adds two HU_D03 training milestones:
+This fork adds three HU_D03 training milestones:
 
 - lower-body velocity tracking with 12 leg joints plus waist roll and pitch;
 - full-body recovery from cached supine, prone, and side-lying poses.
+- full-body reference-motion tracking for dance and other authored motions.
 
 For a reproducible new-machine setup and an agent-oriented execution
 checklist, read the repository-root
@@ -121,6 +122,56 @@ poses. A final policy is useful only after it succeeds without lift assistance.
 The first launch can take several minutes because it simulates and caches the
 fallen poses. Delete a cache only when intentionally changing the robot asset,
 terrain, or fallen-state configuration.
+
+## Whole-body dance tracking
+
+`Tracking-Flat-HU-D03-v0` controls all 31 active joints and tracks a 50 Hz
+reference clip. The motion file must contain the canonical HU_D03 joint and
+body-name metadata; this prevents a G1 clip from silently driving the wrong
+joints.
+
+Generate the included 8-second integration choreography with MuJoCo forward
+kinematics:
+
+```bash
+python scripts/utils/generate_hu_d03_dance_motion.py \
+  --output-file motions/hu_d03_starter_dance.npz
+
+python scripts/validate_hu_d03_motion.py \
+  motions/hu_d03_starter_dance.npz
+```
+
+The generated clip is a small sway/bounce/arm-wave sequence for verifying the
+pipeline. It is not a polished dance dataset. For a custom dance, retarget the
+motion to HU_D03 first and produce the same 31-joint, 15-body file contract.
+Do not feed `Tracking-Flat-G1-v0` data directly to this task.
+
+Visually inspect reference reset poses before training:
+
+```bash
+export MOTION_FILE="$PWD/motions/hu_d03_starter_dance.npz"
+python scripts/play.py \
+  --task Tracking-Flat-HU-D03-v0 \
+  --num_envs 4 \
+  --num_steps 500
+```
+
+Then run a short training smoke test:
+
+```bash
+export MOTION_FILE="$PWD/motions/hu_d03_starter_dance.npz"
+python scripts/train.py \
+  --task Tracking-Flat-HU-D03-v0 \
+  --num_envs 64 \
+  --max_iterations 10 \
+  --headless \
+  --logger tensorboard
+```
+
+After checking tracking errors, contacts, action dimension `31`, and rendered
+motion, increase environment count gradually. The default PPO budget is
+30,000 iterations and outputs to
+`logs/rsl_rl/hu_d03_flat_tracking/<timestamp>_hu_d03_dance/`.
 
 ## Before sim-to-real
 

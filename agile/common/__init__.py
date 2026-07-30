@@ -13,6 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .motion_data import MotionData
-
 __all__ = ["MotionData"]
+
+
+def __getattr__(name: str):
+    """Keep lightweight metadata modules importable without PyTorch."""
+
+    if name == "MotionData":
+        from .motion_data import MotionData
+
+        return MotionData
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

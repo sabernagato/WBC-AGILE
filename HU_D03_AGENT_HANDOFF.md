@@ -5,9 +5,10 @@
 > validation, and stop before any real-robot deployment.
 
 本文档用于在一台新的 Linux/NVIDIA GPU 机器上复现
-`Velocity-HU-D03-History-v0` 和 `StandUp-HU-D03-v0` 的仿真与训练环境。当前分支
-包含 14-DoF 下肢速度跟踪，以及从仰卧、俯卧、侧卧和随机倒地姿态恢复的 31-DoF
-全身起立任务；两者都还不是可直接上真机的控制器。
+`Velocity-HU-D03-History-v0`、`StandUp-HU-D03-v0` 和
+`Tracking-Flat-HU-D03-v0` 的仿真与训练环境。当前分支包含 14-DoF 下肢速度
+跟踪、从仰卧/俯卧/侧卧/随机倒地姿态恢复的 31-DoF 全身起立，以及 31-DoF
+舞蹈参考动作跟踪；这些都还不是可直接上真机的控制器。
 
 ## 0. Agent 执行边界
 
@@ -271,6 +272,11 @@ python scripts/eval.py \
 - Stand-up environment：`agile/rl_env/tasks/stand_up/hu_d03/stand_up_env_cfg.py`
 - Stand-up PPO：`agile/rl_env/tasks/stand_up/hu_d03/agents/rsl_rl_ppo_cfg.py`
 - Fallen-state hook：`agile/rl_env/tasks/stand_up/hu_d03/pre_learn.py`
+- Dance environment：`agile/rl_env/tasks/tracking/hu_d03/flat_env_cfg.py`
+- Dance PPO：`agile/rl_env/tasks/tracking/hu_d03/agents/rsl_rl_ppo_cfg.py`
+- Motion schema：`agile/common/hu_d03_motion.py`
+- Starter motion generator：`scripts/utils/generate_hu_d03_dance_motion.py`
+- Motion validator：`scripts/validate_hu_d03_motion.py`
 - Asset validator：`scripts/validate_hu_d03_assets.py`
 - Human-readable integration notes：`docs/source/hu-d03.md`
 
@@ -332,3 +338,77 @@ logs/rsl_rl/stand_up_hu_d03/<timestamp>_stand_up_hu_d03/model_*.pt
 必须确认 `adaptive_lift` curriculum 已将 assist 降为 `0`，再分别统计仰卧、俯卧、
 左右侧卧的无辅助起立成功率。当前策略也不能直接上真机，因为倒地接触会显著放大
 尚未标定的碰撞、执行器和并行连杆误差。
+
+## 11. 舞蹈参考动作跟踪
+
+`Tracking-Flat-HU-D03-v0` 是独立的全身策略，动作维度为 `31`。它逐帧跟踪
+50 Hz 参考动作中的关节位置/速度和 15 个关键身体的位姿/速度；它不会替代行走或
+倒地起身策略。
+
+不要直接复用 G1 舞蹈 `.npz`。HU_D03 与 G1 的关节数、腕部轴定义、头部关节、
+连杆尺寸和动作数组顺序都不同。训练文件必须包含 `joint_names` 和 `body_names`
+元数据，并通过本仓库校验。
+
+先生成可自由使用的 pipeline integration 动作。该动作只有摆动、屈膝和手臂波浪，
+用于验证完整训练链路，不代表最终舞蹈质量：
+
+```bash
+cd ~/hu_d03_training/WBC-AGILE
+mkdir -p motions
+
+python scripts/utils/generate_hu_d03_dance_motion.py \
+  --output-file motions/hu_d03_starter_dance.npz
+
+python scripts/validate_hu_d03_motion.py \
+  motions/hu_d03_starter_dance.npz
+```
+
+校验必须显示：`50 fps`、`31 joints`、`15 bodies` 且退出码为 `0`。自定义舞蹈
+也必须先重定向到同一契约；如果没有 HU_D03 FK 后的 `body_*` 数据，不能只拿一组
+关节角开始训练。
+
+先可视化 reference reset：
+
+```bash
+export MOTION_FILE="$PWD/motions/hu_d03_starter_dance.npz"
+python scripts/play.py \
+  --task Tracking-Flat-HU-D03-v0 \
+  --num_envs 4 \
+  --num_steps 500
+```
+
+确认身体和 ghost/reference 姿态一致，双脚不穿地，动作维度为 `31`，没有
+joint/body remap 或 NaN 错误。然后做短训练：
+
+```bash
+export MOTION_FILE="$PWD/motions/hu_d03_starter_dance.npz"
+python scripts/train.py \
+  --task Tracking-Flat-HU-D03-v0 \
+  --num_envs 64 \
+  --max_iterations 10 \
+  --headless \
+  --logger tensorboard
+```
+
+通过后按 `256 → 512/1024` 逐步扩大：
+
+```bash
+export MOTION_FILE="$PWD/motions/hu_d03_starter_dance.npz"
+python scripts/train.py \
+  --task Tracking-Flat-HU-D03-v0 \
+  --num_envs 1024 \
+  --headless \
+  --logger wandb \
+  --log_project_name Tracking-HU-D03
+```
+
+默认训练预算为 `30,000` iterations，产物位于：
+
+```text
+logs/rsl_rl/hu_d03_flat_tracking/<timestamp>_hu_d03_dance/model_*.pt
+```
+
+结果验收至少包括：全片段 tracking error、脚底非预期滑动、非脚/手接触、关节/扭矩
+限位、随机扰动恢复能力，以及不同 phase 起始的成功率。starter motion 训通只说明
+参考跟踪链路有效；要获得真正的舞蹈效果，还需要高质量 HU_D03 重定向动作和进一步
+调参。任何策略上真机前仍必须完成第 0 节安全边界中的硬件标定与保护。

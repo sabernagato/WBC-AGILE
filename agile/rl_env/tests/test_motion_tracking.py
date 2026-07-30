@@ -50,7 +50,15 @@ def _get_body_indices(command: _MockCommand, body_names: list[str] | None) -> li
     return [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
 
 
-def _make_npz(num_frames: int, num_joints: int, num_bodies: int, *, body_pos_fn=None) -> str:
+def _make_npz(
+    num_frames: int,
+    num_joints: int,
+    num_bodies: int,
+    *,
+    body_pos_fn=None,
+    joint_names: list[str] | None = None,
+    body_names: list[str] | None = None,
+) -> str:
     """Create a temporary .npz and return its path.  Caller must unlink."""
     joint_pos = np.zeros((num_frames, num_joints), dtype=np.float32)
     joint_vel = np.zeros((num_frames, num_joints), dtype=np.float32)
@@ -68,16 +76,20 @@ def _make_npz(num_frames: int, num_joints: int, num_bodies: int, *, body_pos_fn=
     body_ang_vel_w = np.zeros((num_frames, num_bodies, 3), dtype=np.float32)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
-    np.savez(
-        tmp.name,
-        fps=50,
-        joint_pos=joint_pos,
-        joint_vel=joint_vel,
-        body_pos_w=body_pos_w,
-        body_quat_w=body_quat_w,
-        body_lin_vel_w=body_lin_vel_w,
-        body_ang_vel_w=body_ang_vel_w,
-    )
+    output = {
+        "fps": 50,
+        "joint_pos": joint_pos,
+        "joint_vel": joint_vel,
+        "body_pos_w": body_pos_w,
+        "body_quat_w": body_quat_w,
+        "body_lin_vel_w": body_lin_vel_w,
+        "body_ang_vel_w": body_ang_vel_w,
+    }
+    if joint_names is not None:
+        output["joint_names"] = np.asarray(joint_names)
+    if body_names is not None:
+        output["body_names"] = np.asarray(body_names)
+    np.savez(tmp.name, **output)
     tmp.close()
     return tmp.name
 
@@ -212,6 +224,59 @@ class TestMotionDataStaticHelpers(unittest.TestCase):
                 tracked_body_names=["missing"],
                 source_body_names=["pelvis", "torso"],
             )
+
+
+class TestMotionDataNameMetadata(unittest.TestCase):
+    def test_required_metadata_must_exist(self):
+        path = _make_npz(3, 2, 2)
+        try:
+            with self.assertRaisesRegex(ValueError, "joint_names"):
+                MotionData(
+                    path,
+                    source_joint_names=["joint_A", "joint_B"],
+                    source_body_names=["body_A", "body_B"],
+                    require_name_metadata=True,
+                )
+        finally:
+            os.unlink(path)
+
+    def test_wrong_metadata_order_fails(self):
+        path = _make_npz(
+            3,
+            2,
+            2,
+            joint_names=["joint_B", "joint_A"],
+            body_names=["body_A", "body_B"],
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "configured source ordering"):
+                MotionData(
+                    path,
+                    source_joint_names=["joint_A", "joint_B"],
+                    source_body_names=["body_A", "body_B"],
+                    require_name_metadata=True,
+                )
+        finally:
+            os.unlink(path)
+
+    def test_matching_metadata_loads(self):
+        path = _make_npz(
+            3,
+            2,
+            2,
+            joint_names=["joint_A", "joint_B"],
+            body_names=["body_A", "body_B"],
+        )
+        try:
+            motion = MotionData(
+                path,
+                source_joint_names=["joint_A", "joint_B"],
+                source_body_names=["body_A", "body_B"],
+                require_name_metadata=True,
+            )
+            self.assertEqual(motion.joint_pos.shape, (3, 2))
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------

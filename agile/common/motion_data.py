@@ -44,6 +44,9 @@ class MotionData:
             reindexed along the joint axis using this index tensor so that the
             resulting ordering matches the consumer's expected joint order.
         device: Torch device string.
+        source_joint_names: Expected ``joint_names`` metadata and source order.
+        source_body_names: Expected ``body_names`` metadata and source order.
+        require_name_metadata: Fail if expected name metadata is absent.
     """
 
     def __init__(
@@ -52,10 +55,19 @@ class MotionData:
         body_indices: Sequence[int] | None = None,
         joint_remap_idx: torch.Tensor | None = None,
         device: str = "cpu",
+        source_joint_names: list[str] | None = None,
+        source_body_names: list[str] | None = None,
+        require_name_metadata: bool = False,
     ):
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
 
+        self._validate_name_metadata(
+            data,
+            source_joint_names=source_joint_names,
+            source_body_names=source_body_names,
+            require=require_name_metadata,
+        )
         self.fps: float = float(data["fps"])
 
         joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
@@ -79,6 +91,38 @@ class MotionData:
             self._body_indices = slice(None)
 
         self.time_step_total: int = self.joint_pos.shape[0]
+
+    @staticmethod
+    def _validate_name_metadata(
+        data: np.lib.npyio.NpzFile,
+        source_joint_names: list[str] | None,
+        source_body_names: list[str] | None,
+        require: bool,
+    ) -> None:
+        """Check optional name arrays before applying configured remaps."""
+
+        expected = {
+            "joint_names": source_joint_names,
+            "body_names": source_body_names,
+        }
+        for key, expected_names in expected.items():
+            if expected_names is None:
+                continue
+            if key not in data:
+                if require:
+                    raise ValueError(
+                        f"Motion file must contain '{key}' metadata for safe remapping."
+                    )
+                continue
+            actual_names = [
+                value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in np.asarray(data[key]).reshape(-1).tolist()
+            ]
+            if actual_names != expected_names:
+                raise ValueError(
+                    f"Motion file '{key}' does not match the configured source ordering. "
+                    f"Expected {expected_names}, found {actual_names}."
+                )
 
     # ------------------------------------------------------------------
     # Body-data properties (filtered by body_indices)

@@ -201,3 +201,19 @@ HU_D03_ACTION_SCALE_LOWER = {
     "waist_roll_joint": 0.15,
     "waist_pitch_joint": 0.15,
 }
+
+# Full-body reference tracking needs enough arm range for gestures while
+# keeping the preliminary, uncalibrated wrist/head groups conservative.
+HU_D03_ACTION_SCALE_FULL_BODY = {
+    ".*_hip_.*_joint": 0.30,
+    ".*_knee_joint": 0.20,
+    ".*_ankle_.*_joint": 0.25,
+    "waist_yaw_joint": 0.20,
+    "waist_roll_joint": 0.15,
+    "waist_pitch_joint": 0.15,
+    ".*_shoulder_.*_joint": 0.35,
+    ".*_elbow_joint": 0.35,
+    ".*_wrist_.*_joint": 0.25,
+    ".*_hand_yaw_joint": 0.25,
+    "head_.*_joint": 0.20,
+}
