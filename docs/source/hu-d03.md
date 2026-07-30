@@ -3,6 +3,10 @@
 This fork adds the first HU_D03 training milestone: lower-body velocity
 tracking with 12 leg joints plus waist roll and pitch.
 
+For a reproducible new-machine setup and an agent-oriented execution
+checklist, read the repository-root
+[`HU_D03_AGENT_HANDOFF.md`](../../HU_D03_AGENT_HANDOFF.md) before training.
+
 ## Asset layout
 
 By default, AGILE expects the robot description repository next to this

@@ -1,0 +1,275 @@
+# HU_D03 Training Machine Handoff / 新机器训练交接
+
+> Agent instruction: read this file completely before installing, changing, or
+> running the HU_D03 task. Work through the phases in order. Do not skip asset
+> validation, and stop before any real-robot deployment.
+
+本文档用于在一台新的 Linux/NVIDIA GPU 机器上复现
+`Velocity-HU-D03-History-v0` 的仿真与训练环境。它描述的是当前分支已经完成的
+第一阶段：14-DoF 下肢速度跟踪（双腿 12 关节，加腰部 roll/pitch），不是全身动作
+模仿，也还不是可直接上真机的控制器。
+
+## 0. Agent 执行边界
+
+Agent 必须遵守以下约束：
+
+1. 使用 Isaac Lab `v2.3.2` 和 Isaac Sim `5.1`，不要自行升级版本。
+2. WBC-AGILE 与机器人描述仓库必须同时存在；不要用 URDF 临时转换结果替换
+   已提供的 USD 物理层。
+3. 先完成资产校验、环境 smoke test，再扩大并行环境数开始正式训练。
+4. 不要启用源 USD 中缺失的 `Robot=Robot` payload。当前配置有意选择
+   `Physics=PhysX`、`Sensor=None`、`Robot=None`。
+5. 不要把当前策略直接部署到真机。电机参数、并行连杆传动、急停与安全状态机
+   尚未完成硬件标定。
+6. 执行期间记录代码 SHA、资产 SHA、GPU、驱动、Isaac Sim/Isaac Lab 版本和完整
+   启动命令。出现 NaN、关节/刚体解析失败、持续穿地或爆炸时立即停止，不要靠扩大
+   reward/惩罚掩盖模型问题。
+
+## 1. 机器与软件前提
+
+- x86_64 Linux 训练机和可运行 Isaac Sim 5.1 的 NVIDIA GPU/驱动。
+- Git、Git LFS、Conda，以及足够存放 Isaac Sim、Isaac Lab、机器人网格和训练日志
+  的磁盘空间。
+- GitHub 读取权限；W&B 仅在使用 `--logger wandb` 时需要。
+- 不要在 Isaac Lab 环境外单独安装另一套 PyTorch/CUDA 来覆盖 Isaac 自带版本。
+
+先记录机器状态：
+
+```bash
+nvidia-smi
+git --version
+git lfs version
+uname -a
+```
+
+## 2. 获取两个仓库
+
+两个仓库默认必须是同级目录，并使用下面的目录名：
+
+```text
+hu_d03_training/
+├── WBC-AGILE/
+└── limx_oli_description/
+    └── HU_D03_description/
+```
+
+执行：
+
+```bash
+mkdir -p ~/hu_d03_training
+cd ~/hu_d03_training
+
+git lfs install
+git clone \
+  --branch agent/add-hu-d03-wbc-training \
+  https://github.com/sabernagato/WBC-AGILE.git
+git -C WBC-AGILE lfs pull
+
+git clone \
+  https://github.com/limxdynamics/humanoid-description.git \
+  limx_oli_description
+git -C limx_oli_description checkout a90f734c153aa3ecffc8b674af1e0a323cb55d1a
+```
+
+记录实际版本：
+
+```bash
+git -C WBC-AGILE rev-parse HEAD
+git -C limx_oli_description rev-parse HEAD
+git -C WBC-AGILE status --short
+git -C limx_oli_description status --short
+```
+
+如果不能使用同级目录，通过环境变量显式给出资产位置：
+
+```bash
+export HU_D03_DESCRIPTION_ROOT=/absolute/path/to/HU_D03_description
+# 只覆盖 Isaac USD 时也可使用：
+# export HU_D03_USD_PATH=/absolute/path/to/HU_D03_03.usd
+```
+
+不要把这些变量写死为某一台机器的路径提交到代码仓库。
+
+## 3. 安装 Isaac Sim、Isaac Lab 和 AGILE
+
+按 Isaac Lab `v2.3.2` 的 binaries installation 流程安装 Isaac Sim 5.1，然后：
+
+```bash
+git clone https://github.com/isaac-sim/IsaacLab.git ~/IsaacLab
+git -C ~/IsaacLab checkout v2.3.2
+
+# 根据实际 Isaac Sim 目录创建链接。
+ln -s /absolute/path/to/isaac-sim ~/IsaacLab/_isaac_sim
+
+cd ~/IsaacLab
+./isaaclab.sh --conda agile_env
+conda activate agile_env
+./isaaclab.sh --install
+```
+
+安装本 fork：
+
+```bash
+conda activate agile_env
+export ISAACLAB_PATH=~/IsaacLab
+
+cd ~/hu_d03_training/WBC-AGILE
+./scripts/setup/install_deps_local.sh
+python scripts/verify_rsl_rl.py
+```
+
+`verify_rsl_rl.py` 必须确认加载的是仓库内
+`agile/algorithms/rsl_rl` 的定制版本，而不是环境中残留的其他 `rsl_rl`。
+
+## 4. 资产预检
+
+优先使用 Isaac Lab 的 Python，这样 `pxr` 可直接检查 USD：
+
+```bash
+cd ~/hu_d03_training/WBC-AGILE
+"${ISAACLAB_PATH}/isaaclab.sh" -p scripts/validate_hu_d03_assets.py
+```
+
+成功标准是进程退出码为 `0`，并显示 `PASSED`。下面这些是当前已知、可解释的
+warning，不等同于失败：
+
+- URDF 只有少量 collision；训练使用 USD 的 PhysX collision。
+- 源 USD 的可选 `HU_D03_03_robot.usd` payload 缺失；任务明确使用
+  `Robot=None`。
+- MJCF 的脚踝和腰部是并行机构执行器；通用 sim-to-MuJoCo 评估前仍需传动映射。
+
+任何 missing asset、31 个主动关节不匹配、USD articulation/collision 缺失都属于
+阻塞错误，必须先修复。
+
+## 5. 分阶段启动
+
+### Phase A：加载环境
+
+先用两个环境、有限步数、无窗口模式检查注册、关节匹配和仿真稳定性：
+
+```bash
+python scripts/play.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 2 \
+  --num_steps 200 \
+  --headless
+```
+
+日志中的 action dimension 应为 `14`。检查机器人初始姿态、双脚接触、base 高度，
+并确认没有 unresolved joint/body、NaN 或 PhysX articulation 错误。
+
+### Phase B：短训练
+
+```bash
+python scripts/train.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 32 \
+  --max_iterations 10 \
+  --headless \
+  --logger tensorboard
+```
+
+确认能够完成迭代并生成 checkpoint：
+
+```text
+logs/rsl_rl/velocity_hu_d03_lower/<timestamp>_velocity_hu_d03_lower/model_*.pt
+```
+
+### Phase C：逐步扩大
+
+先尝试 `256` 或 `512` 个环境，再根据显存和仿真吞吐扩大；不要第一次启动就假定
+`2048` 一定适合当前 GPU。
+
+```bash
+python scripts/train.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 512 \
+  --max_iterations 1000 \
+  --headless \
+  --logger tensorboard
+```
+
+确认 reward、episode length、关节速度、接触力和 value loss 没有异常后，正式训练：
+
+```bash
+python scripts/train.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 2048 \
+  --headless \
+  --logger wandb \
+  --log_project_name Velocity-HU-D03-Lower
+```
+
+默认配置训练 `50,000` iterations，每 `250` iterations 保存一次。使用 W&B 前只在
+机器本地完成 `wandb login`，不要把 API key 写入仓库、命令日志或交接文档。
+
+## 6. 恢复、评估和保留产物
+
+从绝对路径恢复：
+
+```bash
+python scripts/train.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 2048 \
+  --headless \
+  --resume True \
+  --checkpoint /absolute/path/to/model_5000.pt
+```
+
+评估 checkpoint：
+
+```bash
+python scripts/eval.py \
+  --task Velocity-HU-D03-History-v0 \
+  --num_envs 32 \
+  --headless \
+  --checkpoint /absolute/path/to/model_5000.pt
+```
+
+每次重要实验至少保留：
+
+- `model_*.pt`；
+- 同一 run 目录下的 `params/env.yaml` 和 `params/agent.yaml`；
+- W&B/TensorBoard 指标；
+- WBC-AGILE 和机器人描述仓库 SHA；
+- 启动命令、seed、GPU/驱动与 Isaac 版本；
+- 训练中发现的模型、碰撞或关节映射异常。
+
+## 7. 常见故障
+
+| 现象 | 首要检查 |
+|---|---|
+| `HU_D03_03.usd` not found | 两仓库是否同级，或 `HU_D03_DESCRIPTION_ROOT` 是否为绝对路径 |
+| Task ID not found | 是否 checkout 正确分支、执行 `install_deps_local.sh`，以及当前是否在 `agile_env` |
+| `rsl_rl` API/import 错误 | 重新执行安装脚本，再运行 `python scripts/verify_rsl_rl.py` |
+| USD 引用 `HU_D03_03_robot.usd` 失败 | 不要启用 `Robot=Robot`；确认使用本分支的 `hu_d03.py` |
+| CUDA OOM | 降低 `--num_envs`，关闭视频与其他 GPU 进程 |
+| 仿真抖动、穿地或爆炸 | 停止训练，检查 USD 版本、初始姿态、collision、质量/惯量和电机参数 |
+| MuJoCo 脚踝/腰部动作不一致 | 当前缺少并行连杆 transmission mapping，不要据此判断策略可部署 |
+
+## 8. 容器和 OSMO 特别说明
+
+当前 `workflows/Dockerfile` 只复制 WBC-AGILE build context，不会自动复制其同级的
+`limx_oli_description`。因此 HU_D03 目前不能仅靠原有 `./run.py ... --rebuild`
+在远端直接成功。
+
+采用 Docker/OSMO 时，Agent 必须先完成其中一种方案：
+
+1. 在运行时只读挂载 `HU_D03_description`，并设置容器内
+   `HU_D03_DESCRIPTION_ROOT`；或
+2. 调整受控 build context，把固定 SHA 的机器人描述复制进镜像，并设置同一变量。
+
+容器内再次执行第 4 节资产校验后，才能提交训练作业。不要把宿主机绝对路径写入
+镜像，也不要在没有资产版本 SHA 的情况下使用浮动 `master`。
+
+## 9. 当前实现入口
+
+- Robot/actuator：`agile/rl_env/assets/robots/hu_d03.py`
+- Environment：`agile/rl_env/tasks/locomotion/hu_d03/velocity_history_env_cfg.py`
+- PPO：`agile/rl_env/tasks/locomotion/hu_d03/agents/rsl_rl_ppo_cfg.py`
+- Task registration：`agile/rl_env/tasks/locomotion/hu_d03/__init__.py`
+- Asset validator：`scripts/validate_hu_d03_assets.py`
+- Human-readable integration notes：`docs/source/hu-d03.md`
+
+完成上述本地仿真训练只说明软件链路可用。进入 sim-to-MuJoCo 或 sim-to-real 前，
+仍需单独完成执行器辨识、并行连杆映射、状态/动作接口和硬件安全验证。
