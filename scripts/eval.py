@@ -43,6 +43,7 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=16, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
@@ -146,6 +147,42 @@ parser.add_argument(
     help="RNG seed for observation noise injection (default: non-deterministic).",
 )
 
+parser.add_argument(
+    "--phase_hip_amplitude",
+    type=float,
+    default=None,
+    help="Override the deterministic phase-reference hip-pitch amplitude for evaluation.",
+)
+parser.add_argument(
+    "--phase_knee_amplitude",
+    type=float,
+    default=None,
+    help="Override the deterministic phase-reference knee amplitude for evaluation.",
+)
+parser.add_argument(
+    "--phase_ankle_amplitude",
+    type=float,
+    default=None,
+    help="Override the deterministic phase-reference ankle amplitude for evaluation.",
+)
+parser.add_argument(
+    "--phase_yaw_amplitude",
+    type=float,
+    default=None,
+    help="Override the phase-synchronous hip-yaw feed-forward amplitude for evaluation.",
+)
+parser.add_argument(
+    "--phase_yaw_damping_gain",
+    type=float,
+    default=None,
+    help="Override the phase-reference hip-yaw damping gain for evaluation.",
+)
+parser.add_argument(
+    "--phase_yaw_damping_limit",
+    type=float,
+    default=None,
+    help="Override the phase-reference hip-yaw damping correction limit for evaluation.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -303,7 +340,10 @@ def load_policy(resume_path, env, agent_cfg):
             log_dir=None,
             device=agent_cfg.device,
         )
-        ppo_runner.load(resume_path)
+        # Evaluation only needs policy weights and normalization state. Loading
+        # optimizer state rejects otherwise valid inference checkpoints whose
+        # optimizer payload was intentionally omitted.
+        ppo_runner.load(resume_path, load_optimizer=False)
 
         # Obtain the trained policy for inference
         policy = ppo_runner.get_inference_policy(device=device)
@@ -331,6 +371,37 @@ def main():
     if hasattr(env_cfg, "eval"):
         env_cfg.eval()
 
+    phase_amplitude_overrides = {
+        "hip_pitch_amplitude": args_cli.phase_hip_amplitude,
+        "knee_amplitude": args_cli.phase_knee_amplitude,
+        "ankle_pitch_amplitude": args_cli.phase_ankle_amplitude,
+    }
+    phase_control_overrides = {
+        "yaw_phase_amplitude": args_cli.phase_yaw_amplitude,
+        "yaw_rate_damping_gain": args_cli.phase_yaw_damping_gain,
+        "yaw_rate_damping_limit": args_cli.phase_yaw_damping_limit,
+    }
+    phase_action_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    requested_phase_overrides = {
+        name: value
+        for name, value in (phase_amplitude_overrides | phase_control_overrides).items()
+        if value is not None
+    }
+    if requested_phase_overrides:
+        if phase_action_cfg is None:
+            raise ValueError("Phase-reference amplitude overrides require an actions.joint_pos configuration.")
+        unsupported = [name for name in requested_phase_overrides if not hasattr(phase_action_cfg, name)]
+        if unsupported:
+            raise ValueError(
+                "The selected task does not support phase-reference amplitude overrides: "
+                + ", ".join(unsupported)
+            )
+        for name, value in requested_phase_overrides.items():
+            if name not in {"yaw_phase_amplitude", "yaw_rate_damping_gain"} and value < 0.0:
+                raise ValueError("Phase-reference amplitudes and limits must be non-negative.")
+            setattr(phase_action_cfg, name, value)
+        print(f"[INFO] Phase-reference amplitude overrides: {requested_phase_overrides}")
+
     # Load evaluation scenario config early to override episode length before env creation
     eval_config = None
     if args_cli.eval_config:
@@ -344,6 +415,9 @@ def main():
         _apply_env_overrides(env_cfg, eval_config)
 
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+
+    # Match training: seed before environment creation because startup events may randomize state.
+    env_cfg.seed = agent_cfg.seed
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -477,15 +551,14 @@ def main():
     elif eval_config is not None:
         from agile.algorithms.evaluation.velocity_height_scheduler import VelocityHeightScheduler
 
-        # Validate num_envs matches
-        if eval_config.num_envs != args_cli.num_envs:
-            print(f"[INFO] Config specifies {eval_config.num_envs} envs but {args_cli.num_envs} was used.")
-            if env.num_envs != eval_config.num_envs:
-                print(
-                    f"[WARNING] Config specifies {eval_config.num_envs} envs but "
-                    f"{env.num_envs} were created. Using {env.num_envs}."
-                )
-                eval_config.num_envs = env.num_envs
+        # Validate against the environment that was actually created. The CLI
+        # default may differ because the evaluation config intentionally wins.
+        if env.num_envs != eval_config.num_envs:
+            print(
+                f"[WARNING] Config specifies {eval_config.num_envs} envs but "
+                f"{env.num_envs} were created. Using {env.num_envs}."
+            )
+            eval_config.num_envs = env.num_envs
 
         # Create scheduler
         scheduler = VelocityHeightScheduler(env, eval_config, verbose=True)
@@ -550,6 +623,7 @@ def main():
             save_trajectories=args_cli.save_trajectories,
             trajectory_fields=args_cli.trajectory_fields,
             joint_group_config=joint_group_config,
+            success_criteria=eval_config.success_criteria if eval_config is not None else None,
             provenance=provenance,
         )
 

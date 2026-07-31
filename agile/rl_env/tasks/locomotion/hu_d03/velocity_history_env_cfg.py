@@ -39,6 +39,7 @@ from agile.rl_env.mdp.terrains import LESS_ROUGH_TERRAIN_CFG, MEDIUM_ROUGH_TERRA
 
 # Define controlled joints for HU_D03 (legs + waist roll/pitch for locomotion)
 CONTROLLED_JOINT_NAMES = hu_d03.CONTROLLED_JOINT_NAMES
+UPPER_BODY_HOLD_JOINT_NAMES = hu_d03.UPPER_BODY_HOLD_JOINT_NAMES
 
 ##
 # Scene definition
@@ -129,7 +130,8 @@ class CommandsCfg:
     base_velocity = mdp.UniformNullVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(8.0, 12.0),
-        rel_standing_envs=0.25,
+        rel_standing_envs=0.10,
+        rel_single_axis_envs=0.5,
         rel_heading_envs=1.0,
         heading_command=False,
         debug_vis=True,
@@ -153,9 +155,51 @@ class ActionsCfg:
         clip={".*": (-10.0, 10.0)},
     )
 
-    # Keep the upper body at its default pose for the first locomotion
-    # milestone. Add RandomActionCfg after the physical model is validated.
-    random_pos = None
+    # This zero-dimensional helper keeps the remaining joints at their default
+    # targets without changing the 14-DoF policy action interface.
+    upper_body_default = mdp.DefaultJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=UPPER_BODY_HOLD_JOINT_NAMES,
+        scale=1.0,
+    )
+
+
+@configclass
+class PhaseHarnessActionsCfg(ActionsCfg):
+    """Lower-body actions plus a zero-dimensional training-only harness."""
+
+    harness = mdp.HarnessActionCfg(
+        asset_name="robot",
+        root_name=hu_d03.ROOT_BODY_NAME,
+        stiffness_torques=1000.0,
+        damping_torques=100.0,
+        stiffness_forces=3000.0,
+        damping_forces=300.0,
+        force_limit=600.0,
+        torque_limit=1000.0,
+        height_sensor="height_measurement_sensor",
+        target_height=hu_d03.DEFAULT_BASE_HEIGHT,
+        command_name=None,
+    )
+
+
+@configclass
+class PhaseResidualHarnessActionsCfg(PhaseHarnessActionsCfg):
+    """Learned lower-body residuals around an anti-phase gait reference."""
+
+    joint_pos = mdp.PhaseReferenceJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=CONTROLLED_JOINT_NAMES,
+        scale=hu_d03.HU_D03_ACTION_SCALE_LOWER,
+        use_default_offset=True,
+        clip={".*": (-10.0, 10.0)},
+        frequency=1.5,
+        command_name="base_velocity",
+        reference_speed=0.45,
+        hip_pitch_amplitude=0.25,
+        knee_amplitude=0.40,
+        ankle_pitch_amplitude=0.20,
+    )
 
 
 @configclass
@@ -211,6 +255,22 @@ class ObservationsCfg:
 
 
 @configclass
+class PhaseObservationsCfg(ObservationsCfg):
+    """Velocity observations extended with an explicit biped gait clock."""
+
+    @configclass
+    class PhaseHistoryPolicyCfg(ObservationsCfg.HistoryPolicyCfg):
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"frequency": 1.5})
+
+    @configclass
+    class PhasePrivilegedVelocityCriticCfg(ObservationsCfg.PrivilegedVelocityCriticCfg):
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"frequency": 1.5})
+
+    policy: PhaseHistoryPolicyCfg = PhaseHistoryPolicyCfg()
+    critic: PhasePrivilegedVelocityCriticCfg = PhasePrivilegedVelocityCriticCfg()
+
+
+@configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
 
@@ -219,7 +279,7 @@ class RewardsCfg:
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
         weight=5.0,
-        params={"command_name": "base_velocity", "std": 0.2},
+        params={"command_name": "base_velocity", "std": 0.5},
     )
 
     track_ang_vel = RewTerm(
@@ -229,6 +289,17 @@ class RewardsCfg:
             "command_name": "base_velocity",
             "std": 0.2,
             "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+        },
+    )
+
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time_positive_biped_command,
+        weight=0.75,
+        params={
+            "command_name": "base_velocity",
+            "command_slice": slice(0, 2),
+            "threshold": 0.4,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=hu_d03.FEET_LINK_NAMES),
         },
     )
 
@@ -374,6 +445,170 @@ class RewardsCfg:
 
 
 @configclass
+class PhaseRewardsCfg(RewardsCfg):
+    """Bootstrap rewards that require actual alternating single support."""
+
+    gait_load_transfer = RewTerm(
+        func=mdp.biped_gait_load_transfer,
+        weight=2.0,
+        params={
+            "command_name": "base_velocity",
+            "frequency": 1.5,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=hu_d03.FEET_LINK_NAMES),
+        },
+    )
+
+    gait_contact_schedule = RewTerm(
+        func=mdp.biped_gait_contact_schedule,
+        weight=5.0,
+        params={
+            "command_name": "base_velocity",
+            "frequency": 1.5,
+            "force_threshold": 10.0,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=hu_d03.FEET_LINK_NAMES),
+        },
+    )
+
+    gait_foot_clearance = RewTerm(
+        func=mdp.biped_gait_foot_clearance,
+        weight=5.0,
+        params={
+            "command_name": "base_velocity",
+            "frequency": 1.5,
+            "target_clearance": 0.08,
+            "std": 0.06,
+            "asset_cfg": SceneEntityCfg("robot", body_names=hu_d03.FEET_LINK_NAMES),
+        },
+    )
+
+
+@configclass
+class PhaseReferenceRewardsCfg(PhaseRewardsCfg):
+    """Phase rewards plus a direct anti-phase leg reference scaffold."""
+
+    gait_joint_reference = RewTerm(
+        func=mdp.biped_gait_joint_reference,
+        weight=25.0,
+        params={
+            "command_name": "base_velocity",
+            "frequency": 1.5,
+            "std": 0.15,
+            "left_joint_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    "left_hip_pitch_joint",
+                    "left_knee_joint",
+                    "left_ankle_pitch_joint",
+                ],
+            ),
+            "right_joint_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    "right_hip_pitch_joint",
+                    "right_knee_joint",
+                    "right_ankle_pitch_joint",
+                ],
+            ),
+            "hip_pitch_amplitude": 0.25,
+            "knee_amplitude": 0.40,
+            "ankle_pitch_amplitude": 0.20,
+        },
+    )
+
+
+@configclass
+class PhaseResidualAdaptiveRewardsCfg(PhaseReferenceRewardsCfg):
+    """Residual gait rewards with a non-saturating upright penalty."""
+
+    orientation_tilt_l2 = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=-10.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["base_link", "waist_pitch_link"])},
+    )
+
+
+@configclass
+class PhaseResidualAdaptiveYawRewardsCfg(PhaseResidualAdaptiveRewardsCfg):
+    """Adaptive gait rewards with direct yaw-rate error shaping."""
+
+    yaw_rate_error_l2 = RewTerm(
+        func=mdp.track_ang_vel_z_l2,
+        weight=-2.0,
+        params={"command_name": "base_velocity"},
+    )
+
+@configclass
+class PhaseResidualHarnessCurriculumCfg:
+    """Linearly remove the training harness after a short adaptation window."""
+
+    remove_harness = CurrTerm(
+        func=mdp.remove_harness,
+        params={
+            "harness_action_name": "harness",
+            "start": 240,
+            "num_steps": 4320,
+        },
+    )
+
+
+@configclass
+class PhaseResidualAdaptiveHarnessCurriculumCfg:
+    """Remove assistance only while the batch remains nearly upright."""
+
+    adaptive_harness = CurrTerm(
+        func=mdp.adaptive_force_decay,
+        params={
+            "action_name": "harness",
+            "metric_name": "orientation_error",
+            "decay_when": "below",
+            "threshold": 0.12,
+            "ema_alpha": 0.01,
+            "decay": 0.9995,
+            "disable_threshold": 0.005,
+            "initial_scale": 0.5,
+        },
+    )
+
+
+@configclass
+class PhaseResidualAdaptiveLowHarnessCurriculumCfg:
+    """Continue adaptive removal from the validated 27% assistance stage."""
+
+    adaptive_harness = CurrTerm(
+        func=mdp.adaptive_force_decay,
+        params={
+            "action_name": "harness",
+            "metric_name": "orientation_error",
+            "decay_when": "below",
+            "threshold": 0.12,
+            "ema_alpha": 0.01,
+            "decay": 0.999,
+            "disable_threshold": 0.005,
+            "initial_scale": 0.27,
+        },
+    )
+
+@configclass
+class PhaseResidualMixedHarnessCurriculumCfg:
+    """Keep supported environments at 27% assistance while zero-support peers train beside them."""
+
+    mixed_harness = CurrTerm(
+        func=mdp.adaptive_force_decay,
+        params={
+            "action_name": "harness",
+            "metric_name": "orientation_error",
+            "decay_when": "below",
+            "threshold": 0.12,
+            "ema_alpha": 0.01,
+            "decay": 1.0,
+            "disable_threshold": 0.005,
+            "initial_scale": 0.27,
+        },
+    )
+
+
+
+@configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
@@ -448,7 +683,7 @@ class LocomotionEventCfg:
         func=mdp.randomize_actuator_gains,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINT_NAMES),
             "stiffness_distribution_params": (0.9, 1.1),
             "damping_distribution_params": (0.8, 2.0),
             "operation": "scale",
@@ -459,7 +694,7 @@ class LocomotionEventCfg:
         func=mdp.randomize_joint_parameters,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINT_NAMES),
             "friction_distribution_params": (0.0, 0.005),
             "operation": "abs",
             "distribution": "uniform",
@@ -469,8 +704,8 @@ class LocomotionEventCfg:
         func=mdp.randomize_joint_parameters,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "armature_distribution_params": (0.0, 2.0),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINT_NAMES),
+            "armature_distribution_params": (0.8, 1.2),
             "operation": "scale",
             "distribution": "uniform",
         },
@@ -566,6 +801,17 @@ class LocomotionEventCfg:
         params={
             "position_range": (0.8, 1.2),
             "velocity_range": (-1.0, 1.0),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CONTROLLED_JOINT_NAMES),
+        },
+    )
+
+    reset_upper_body_joints = EventTerm(
+        func=mdp.reset_joints_by_scale,
+        mode="reset",
+        params={
+            "position_range": (1.0, 1.0),
+            "velocity_range": (1.0, 1.0),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=UPPER_BODY_HOLD_JOINT_NAMES),
         },
     )
 
@@ -678,5 +924,192 @@ class HUD03LowerVelocityHistoryEnvCfg(ManagerBasedRLEnvCfg):
 
     def eval(self):
         self.observations.eval = mdp.EvaluationObservationsCfg()
+        self.observations.policy.enable_corruption = False
         self.rewards = None
         self.curriculum = None
+        # Training disturbances must not leak into deterministic evaluation.
+        self.events.apply_external_force_torque = None
+        self.events.apply_external_force_torque_extremities = None
+        self.events.push_robot = None
+
+
+@configclass
+class HUD03LowerVelocityHistoryBootstrapEnvCfg(HUD03LowerVelocityHistoryEnvCfg):
+    """Flat-ground curriculum used only to bootstrap a genuine stepping gait."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.terrain.terrain_type = "plane"
+        self.scene.terrain.terrain_generator = None
+        self.curriculum = None
+
+        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.commands.base_velocity.rel_single_axis_envs = 0.0
+        self.commands.base_velocity.ranges.lin_vel_x = (0.2, 0.5)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+        # The plain exponential gives a stationary policy substantial reward
+        # (exp(-(0.2..0.5)^2 / 0.5^2)), which makes standing a strong local
+        # optimum. During gait bootstrap, also require the achieved velocity
+        # to point along the commanded direction: standing receives zero and
+        # backwards motion receives a negative reward.
+        self.rewards.track_lin_vel_xy_exp.func = mdp.track_lin_vel_xy_yaw_frame_exp_aligned
+        self.rewards.track_lin_vel_xy_exp.weight = 10.0
+        self.rewards.track_ang_vel.weight = 2.0
+        self.rewards.base_height.weight = 1.5
+        self.rewards.orientation.weight = 2.5
+        self.rewards.feet_air_time.weight = 1.0
+        self.rewards.action_rate.weight = -0.05
+        self.rewards.action_rate_rate.weight = -0.005
+
+        self.events.randomize_physics_material = None
+        self.events.randomize_actuator_gains = None
+        self.events.randomize_joint_friction = None
+        self.events.randomize_joint_armature = None
+        self.events.randomize_bodies_mass = None
+        self.events.randomize_base_mass = None
+        self.events.randomize_bodies_com = None
+        self.events.randomize_base_com = None
+        self.events.apply_external_force_torque = None
+        self.events.apply_external_force_torque_extremities = None
+        self.events.push_robot = None
+
+        self.events.reset_base.params["pose_range"].update({"roll": (0.0, 0.0), "pitch": (0.0, 0.0)})
+        self.events.reset_base.params["velocity_range"] = {
+            axis: (0.0, 0.0) for axis in ("x", "y", "z", "roll", "pitch", "yaw")
+        }
+        self.events.reset_robot_joints.params["position_range"] = (0.95, 1.05)
+        self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseBootstrapEnvCfg(HUD03LowerVelocityHistoryBootstrapEnvCfg):
+    """Flat gait bootstrap with an explicit phase and dense load-transfer target."""
+
+    observations: PhaseObservationsCfg = PhaseObservationsCfg()
+    rewards: PhaseRewardsCfg = PhaseRewardsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Preserve balance while requiring true, phase-matched single support.
+        self.rewards.termination_penalty.weight = -200.0
+        self.rewards.track_lin_vel_xy_exp.weight = 8.0
+        self.rewards.base_height.weight = 3.0
+        self.rewards.orientation.weight = 5.0
+        self.rewards.feet_air_time.weight = 3.0
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseHarnessEnvCfg(
+    HUD03LowerVelocityHistoryPhaseBootstrapEnvCfg
+):
+    """Phase gait bootstrap with training-only height/orientation assistance."""
+
+    actions: PhaseHarnessActionsCfg = PhaseHarnessActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # With falls temporarily arrested, prioritize learning actual leg
+        # alternation rather than merely shifting load between planted feet.
+        self.rewards.feet_air_time.weight = 5.0
+        self.rewards.gait_contact_schedule.weight = 10.0
+        self.rewards.gait_foot_clearance.weight = 10.0
+
+    def eval(self):
+        super().eval()
+        if hasattr(self.actions, "harness"):
+            del self.actions.harness
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseReferenceHarnessEnvCfg(
+    HUD03LowerVelocityHistoryPhaseHarnessEnvCfg
+):
+    """Training-only harness plus an explicit alternating leg reference."""
+
+    rewards: PhaseReferenceRewardsCfg = PhaseReferenceRewardsCfg()
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseResidualHarnessEnvCfg(
+    HUD03LowerVelocityHistoryPhaseReferenceHarnessEnvCfg
+):
+    """Periodic gait reference with learned residuals and training-only harness."""
+
+    actions: PhaseResidualHarnessActionsCfg = PhaseResidualHarnessActionsCfg()
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseResidualHarnessDecayEnvCfg(
+    HUD03LowerVelocityHistoryPhaseResidualHarnessEnvCfg
+):
+    """Residual gait task that linearly removes all harness assistance."""
+
+    curriculum: PhaseResidualHarnessCurriculumCfg = PhaseResidualHarnessCurriculumCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        # The flat bootstrap parent disables its terrain curriculum. Restore only harness removal.
+        self.curriculum = PhaseResidualHarnessCurriculumCfg()
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseResidualHarnessAdaptiveEnvCfg(
+    HUD03LowerVelocityHistoryPhaseResidualHarnessEnvCfg
+):
+    """Residual gait task with performance-gated harness removal."""
+
+    rewards: PhaseResidualAdaptiveRewardsCfg = PhaseResidualAdaptiveRewardsCfg()
+    curriculum: PhaseResidualAdaptiveHarnessCurriculumCfg = PhaseResidualAdaptiveHarnessCurriculumCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        # The flat bootstrap parent disables its terrain curriculum. Restore only
+        # performance-gated harness removal and strengthen the cost of falling.
+        self.curriculum = PhaseResidualAdaptiveHarnessCurriculumCfg()
+        self.rewards.termination_penalty.weight = -500.0
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseResidualHarnessAdaptiveLowEnvCfg(
+    HUD03LowerVelocityHistoryPhaseResidualHarnessAdaptiveEnvCfg
+):
+    """Low-assistance continuation with tighter velocity and yaw tracking."""
+
+    rewards: PhaseResidualAdaptiveYawRewardsCfg = PhaseResidualAdaptiveYawRewardsCfg()
+    curriculum: PhaseResidualAdaptiveLowHarnessCurriculumCfg = PhaseResidualAdaptiveLowHarnessCurriculumCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Continue from the assistance level reached by the previous stage.
+        self.curriculum = PhaseResidualAdaptiveLowHarnessCurriculumCfg()
+        self.rewards.track_ang_vel.weight = 5.0
+        self.rewards.track_lin_vel_xy_exp.weight = 12.0
+        self.rewards.track_lin_vel_xy_exp.params["std"] = 0.3
+
+
+@configclass
+class HUD03LowerVelocityHistoryPhaseResidualHarnessMixedEnvCfg(
+    HUD03LowerVelocityHistoryPhaseResidualHarnessAdaptiveLowEnvCfg
+):
+    """Train one shared policy on supported and fully unassisted environments."""
+
+    curriculum: PhaseResidualMixedHarnessCurriculumCfg = PhaseResidualMixedHarnessCurriculumCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.curriculum = PhaseResidualMixedHarnessCurriculumCfg()
+        self.actions.harness.unassisted_env_fraction = 0.25
+
+        amplitudes = {
+            "hip_pitch_amplitude": 0.1875,
+            "knee_amplitude": 0.30,
+            "ankle_pitch_amplitude": 0.15,
+        }
+        for name, value in amplitudes.items():
+            setattr(self.actions.joint_pos, name, value)
+            self.rewards.gait_joint_reference.params[name] = value

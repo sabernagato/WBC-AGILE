@@ -48,6 +48,7 @@ class PolicyEvaluator:
         save_trajectories: bool = False,
         trajectory_fields: list[str] | None = None,
         joint_group_config: dict | None = None,
+        success_criteria: dict[str, float] | None = None,
         provenance: dict | None = None,
     ):
         """Initialize a policy evaluator.
@@ -66,6 +67,8 @@ class PolicyEvaluator:
                               Format: {"upper_body": ["joint1", ".*_shoulder_.*", ...], ...}
                               Each value is a list of joint names/patterns supporting wildcards.
                               If None, all joints go to "default" group.
+            success_criteria: Optional maximum thresholds for episode metrics.
+                              Full survival and every threshold are required for success.
             provenance: Optional dict recording how this evaluation was produced
                        (checkpoint path, task name, eval config, CLI args, etc.).
                        Saved into trajectory metadata.json for reproducibility.
@@ -84,7 +87,10 @@ class PolicyEvaluator:
 
         # Initialize metrics calculator
         self._metrics = MotionMetricsAnalyzer(
-            max_episode_length=self._max_episode_len, joint_groups=self._joint_groups, verbose=verbose
+            max_episode_length=self._max_episode_len,
+            joint_groups=self._joint_groups,
+            verbose=verbose,
+            success_criteria=success_criteria,
         )
         self._metrics_path = metrics_path
 
@@ -119,6 +125,8 @@ class PolicyEvaluator:
 
         # Set target number of environments to evaluate
         self._total_envs_target = total_envs_target
+        self._single_episode_per_env = self._total_envs_target == self._num_envs
+        self._evaluated_env_mask = torch.zeros(self._num_envs, dtype=torch.bool, device=self._device)
 
         # Store previous frame to handle terminal states correctly
         # When done=True, observations contain reset state, so we use previous frame
@@ -309,40 +317,58 @@ class PolicyEvaluator:
         frame_data = self._extract_frame_data(info)
         current_frame = Frame.from_dict(frame_data)
 
-        # Get terminated environment IDs
-        terminated_ids = dones.nonzero(as_tuple=False).squeeze(-1) if dones.any() else None
+        # Keep all physical terminations for buffer resets, but only count the
+        # first termination from each env in deterministic one-episode mode.
+        buffer_terminated_ids = dones.nonzero(as_tuple=False).squeeze(-1) if dones.any() else None
+        terminated_ids = buffer_terminated_ids
+        accepted_positions = None
 
-        # If we have more terminations than needed, only take what we need to reach the target
-        if terminated_ids is not None and len(terminated_ids) > 0:
-            remaining_needed = self._total_envs_target - self._num_envs_evaluated
-            if remaining_needed < len(terminated_ids):
-                terminated_ids = terminated_ids[:remaining_needed]
+        if buffer_terminated_ids is not None and len(buffer_terminated_ids) > 0:
+            if self._single_episode_per_env:
+                accepted_mask = ~self._evaluated_env_mask[buffer_terminated_ids]
+                accepted_positions = torch.nonzero(accepted_mask, as_tuple=False).squeeze(-1)
+                terminated_ids = buffer_terminated_ids[accepted_mask]
+            else:
+                remaining_needed = self._total_envs_target - self._num_envs_evaluated
+                if remaining_needed < len(buffer_terminated_ids):
+                    buffer_terminated_ids = buffer_terminated_ids[:remaining_needed]
+                terminated_ids = buffer_terminated_ids
 
         # Determine which frame to add to the buffer
         # For non-terminated environments: use current frame (contains valid observations)
         # For terminated environments: use previous frame (current contains reset observations)
-        if self._previous_frame is not None and terminated_ids is not None and len(terminated_ids) > 0:
+        if self._previous_frame is not None and buffer_terminated_ids is not None and len(buffer_terminated_ids) > 0:
             # Create a hybrid frame: use previous frame data for terminated envs, current for others
-            frame_to_add = self._create_hybrid_frame(current_frame, self._previous_frame, terminated_ids)
+            frame_to_add = self._create_hybrid_frame(current_frame, self._previous_frame, buffer_terminated_ids)
         else:
             # First step or no terminations: use current frame
             frame_to_add = current_frame
 
-        # Add frame to episode buffer and get terminated episode data
-        terminated_data = self._episode_buffer.add_frame(frame_to_add, terminated_ids)
+        # Reset buffers for every physical termination, including repeats from
+        # envs whose single deterministic episode was already recorded.
+        terminated_data = self._episode_buffer.add_frame(frame_to_add, buffer_terminated_ids)
 
-        # Process terminated data if any
-        if terminated_data is not None:
+        if self._single_episode_per_env and terminated_data is not None and accepted_positions is not None:
+            selected_data = {}
+            for key, value in terminated_data.items():
+                if not isinstance(value, torch.Tensor):
+                    selected_data[key] = value
+                elif key == "frame_counts":
+                    selected_data[key] = value[accepted_positions]
+                else:
+                    selected_data[key] = value[:, accepted_positions]
+            terminated_data = selected_data
+
+        # Process newly accepted episode data if any.
+        if terminated_data is not None and terminated_ids is not None and len(terminated_ids) > 0:
             # Update metrics with terminated data
-            self._metrics.update(terminated_data)
+            success_mask = self._metrics.update(terminated_data)
 
             # Log trajectories if enabled
             if self._trajectory_logger:
-                # Get frame counts to determine success
-                frame_counts = terminated_data.get("frame_counts")
                 is_success = (
-                    frame_counts == self._max_episode_len
-                    if frame_counts is not None
+                    success_mask
+                    if success_mask is not None
                     else torch.zeros_like(terminated_ids, dtype=torch.bool)
                 )
 
@@ -360,6 +386,7 @@ class PolicyEvaluator:
 
                 if self._verbose:
                     mode = "env_id-based" if self._total_envs_target == self._num_envs else "sequential"
+                    frame_counts = terminated_data.get("frame_counts")
                     print(f"[DEBUG] Logging {len(terminated_ids)} episodes ({mode} numbering): {episode_numbers}")
                     print(f"[DEBUG] Env IDs: {terminated_ids.cpu().tolist()}")
                     print(f"[DEBUG] Frame counts: {frame_counts.tolist() if frame_counts is not None else 'None'}")
@@ -374,6 +401,8 @@ class PolicyEvaluator:
                 )
 
             # Count newly terminated environments
+            if self._single_episode_per_env:
+                self._evaluated_env_mask[terminated_ids] = True
             num_terminations = len(terminated_ids)
             self._num_envs_evaluated += num_terminations
 

@@ -250,12 +250,47 @@ class TestMotionMetricsAnalyzer(unittest.TestCase):
         metrics_dict = self.metrics.get_metrics()
 
         # Check that it contains all the expected keys
+        self.assertIn("survival_rate", metrics_dict)
         self.assertIn("success_rate", metrics_dict)
         self.assertIn("metrics", metrics_dict)
         self.assertIn("success_metrics", metrics_dict)
 
         # Check that success rate is correct
+        self.assertEqual(metrics_dict["survival_rate"], 0.5)
         self.assertEqual(metrics_dict["success_rate"], 0.5)
+
+    def test_success_requires_velocity_tracking_when_configured(self):
+        """A surviving but stationary robot must fail a commanded-walking episode."""
+        num_frames = self.max_episode_length
+        commands = torch.zeros((num_frames, 2, 3))
+        commands[:, :, 0] = 0.4
+        root_lin_vel_robot = torch.zeros((num_frames, 2, 3))
+        root_lin_vel_robot[:, 0, 0] = 0.4
+
+        data = {
+            "frame_counts": torch.tensor([num_frames, num_frames]),
+            "joint_pos": torch.zeros((num_frames, 2, self.num_joints, 1)),
+            "joint_vel": torch.zeros((num_frames, 2, self.num_joints, 1)),
+            "joint_acc": torch.zeros((num_frames, 2, self.num_joints, 1)),
+            "commands": commands,
+            "root_lin_vel_robot": root_lin_vel_robot,
+            "root_ang_vel": torch.zeros((num_frames, 2, 3)),
+        }
+        metrics = MotionMetricsAnalyzer(
+            max_episode_length=num_frames,
+            success_criteria={
+                "mean_lin_vel_xy_error": 0.15,
+                "mean_yaw_rate_error": 0.15,
+            },
+        )
+
+        success_mask = metrics.update(data)
+        metrics.conclude()
+
+        self.assertEqual(success_mask.tolist(), [True, False])
+        self.assertEqual(metrics.survival_rate, 1.0)
+        self.assertEqual(metrics.success_rate, 0.5)
+        self.assertAlmostEqual(metrics._metrics["mean_lin_vel_xy_error"], 0.2)
 
     def test_save_metrics(self):
         """Test saving metrics to a file."""

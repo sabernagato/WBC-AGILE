@@ -261,6 +261,70 @@ class TestPolicyEvaluator(unittest.TestCase):
             self.assertEqual(self.evaluator._num_envs_evaluated, 4)
             self.assertTrue(is_complete)
 
+    def test_verbose_trajectory_logging_uses_terminated_frame_counts(self):
+        """Verbose trajectory logging must not reference stale local state."""
+        self.evaluator._verbose = True
+        self.evaluator._trajectory_logger = MagicMock()
+        self.evaluator._metrics = MagicMock()
+        self.evaluator._metrics.num_envs_successful = 0
+        self.evaluator._metrics.update.return_value = torch.tensor([True])
+        frame_data = {
+            "joint_pos": torch.ones((self.num_envs, self.num_joints, 1)),
+            "joint_vel": torch.ones((self.num_envs, self.num_joints, 1)),
+            "joint_acc": torch.ones((self.num_envs, self.num_joints, 1)),
+            "root_pos": torch.ones((self.num_envs, 3)),
+            "root_rot": torch.ones((self.num_envs, 4)),
+            "root_lin_vel": torch.ones((self.num_envs, 3)),
+            "root_lin_vel_robot": torch.ones((self.num_envs, 3)),
+            "root_ang_vel": torch.ones((self.num_envs, 3)),
+            "commands": torch.ones((self.num_envs, 4)),
+            "actions": torch.ones((self.num_envs, self.num_joints, 1)),
+        }
+
+        with patch.object(self.evaluator, "_extract_frame_data", return_value=frame_data):
+            self.evaluator.collect(torch.zeros(self.num_envs, dtype=torch.bool), self.info)
+            self.evaluator.collect(torch.tensor([True, False]), self.info)
+
+        self.evaluator._trajectory_logger.log_episodes.assert_called_once()
+        logged_data = self.evaluator._trajectory_logger.log_episodes.call_args.kwargs["episode_data"]
+        self.assertEqual(logged_data["frame_counts"].tolist(), [2])
+
+    def test_single_episode_mode_counts_each_env_once(self):
+        """Repeated terminations from one env must not satisfy the unique-env target."""
+
+        evaluator = PolicyEvaluator(
+            self.env,
+            task_name="test_task",
+            metrics_path=self.temp_dir,
+            total_envs_target=self.num_envs,
+        )
+        evaluator._metrics = MagicMock()
+        evaluator._metrics.num_envs_successful = 0
+        frame_data = {
+            "joint_pos": torch.ones((self.num_envs, self.num_joints, 1)),
+        }
+
+        with patch.object(evaluator, "_extract_frame_data", return_value=frame_data):
+            evaluator.collect(torch.zeros(self.num_envs, dtype=torch.bool), self.info)
+
+            first_done = evaluator.collect(torch.tensor([True, False]), self.info)
+            self.assertFalse(first_done)
+            self.assertEqual(evaluator._num_envs_evaluated, 1)
+            self.assertTrue(evaluator._evaluated_env_mask[0])
+            self.assertEqual(evaluator._episode_buffer._num_frames[0], 0)
+
+            repeated_done = evaluator.collect(torch.tensor([True, False]), self.info)
+            self.assertFalse(repeated_done)
+            self.assertEqual(evaluator._num_envs_evaluated, 1)
+            self.assertEqual(evaluator._metrics.update.call_count, 1)
+            self.assertEqual(evaluator._episode_buffer._num_frames[0], 0)
+
+            final_done = evaluator.collect(torch.tensor([False, True]), self.info)
+            self.assertTrue(final_done)
+            self.assertEqual(evaluator._num_envs_evaluated, 2)
+            self.assertEqual(evaluator._evaluated_env_mask.tolist(), [True, True])
+            self.assertEqual(evaluator._metrics.update.call_count, 2)
+
     def test_conclude(self):
         """Test the conclude method."""
         # Mock metrics to isolate testing to just the evaluator functionality

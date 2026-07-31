@@ -25,6 +25,10 @@ from isaaclab.utils import configclass  # noqa: F401
 from agile.rl_env.mdp.actions.harness_action import HarnessAction
 from agile.rl_env.mdp.actions.lift_action import LiftAction
 
+from .default_actions import (  # noqa: F401, E402
+    DefaultJointPositionAction,
+    PhaseReferenceJointPositionAction,
+)
 from .delta_actions import DeltaJointPositionAction  # noqa: F401, E402
 
 # Import GUI action class for registration
@@ -41,6 +45,29 @@ from .velocity_profiles import (
 ##
 # Joint actions.
 ##
+
+
+@configclass
+class DefaultJointPositionActionCfg(mdp.JointActionCfg):
+    """Configuration for a zero-dimensional term that holds joints at their default positions."""
+
+    class_type: type[ActionTerm] = DefaultJointPositionAction
+
+
+@configclass
+class PhaseReferenceJointPositionActionCfg(mdp.JointPositionActionCfg):
+    """Joint-position residual action with a command-gated biped gait reference."""
+
+    class_type: type[ActionTerm] = PhaseReferenceJointPositionAction
+    frequency: float = 1.5
+    command_name: str = "base_velocity"
+    reference_speed: float = 0.45
+    hip_pitch_amplitude: float = 0.25
+    knee_amplitude: float = 0.40
+    ankle_pitch_amplitude: float = 0.20
+    yaw_phase_amplitude: float = 0.0
+    yaw_rate_damping_gain: float = 0.0
+    yaw_rate_damping_limit: float = 0.0
 
 
 @configclass
@@ -141,6 +168,8 @@ class HarnessActionCfg(ActionTermCfg):
     """The target height of the harness action. Defaults to 0.72."""
     command_name: str | None = None
     """Name of the command term for height commands (e.g., 'base_velocity'). If None, uses fixed target_height."""
+    unassisted_env_fraction: float = 0.0
+    """Fraction of environments that receive no harness wrench. Must be in [0, 1]."""
 
 
 @configclass

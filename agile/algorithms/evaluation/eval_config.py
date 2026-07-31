@@ -166,12 +166,19 @@ class EvalConfig:
     episode_length_s: float
     num_episodes: int = 1
     joint_groups: dict | None = None
+    success_criteria: dict[str, float] | None = None
     global_overrides: dict = field(default_factory=dict)
     environments: list[EnvConfig] = field(default_factory=list)
     env_overrides: EnvOverrides | None = None
 
     def __post_init__(self):
         """Validate configuration."""
+        for metric_name, max_value in (self.success_criteria or {}).items():
+            if not isinstance(max_value, (int, float)) or max_value < 0:
+                raise ValueError(
+                    f"Success criterion '{metric_name}' must have a non-negative numeric threshold"
+                )
+
         # Check that all env_ids are unique and cover [0, num_envs)
         assigned_ids = set()
         for env_cfg in self.environments:
@@ -297,6 +304,7 @@ class EvalConfig:
             episode_length_s=eval_data["episode_length_s"],
             num_episodes=eval_data.get("num_episodes", 1),
             joint_groups=joint_groups,
+            success_criteria=eval_data.get("success_criteria"),
             global_overrides=eval_data.get("global_overrides", {}),
             environments=environments,
             env_overrides=env_overrides,

@@ -1,0 +1,63 @@
+# HU_D03 lower-body locomotion capability evaluation with grouped metrics.
+evaluation:
+  task_name: "Velocity-HU-D03-History-v0"
+  num_envs: 4
+  episode_length_s: 100.0
+  num_episodes: 1
+  success_criteria:
+    mean_lin_vel_xy_error: 0.15
+    mean_yaw_rate_error: 0.15
+  joint_groups:
+    controlled_lower:
+      - ".*_hip_.*_joint"
+      - ".*_knee_joint"
+      - ".*_ankle_.*_joint"
+      - "waist_roll_joint"
+      - "waist_pitch_joint"
+    held_upper:
+      - "waist_yaw_joint"
+      - "head_.*_joint"
+      - ".*_shoulder_.*_joint"
+      - ".*_elbow_joint"
+      - ".*_wrist_.*_joint"
+      - ".*_hand_yaw_joint"
+  env_overrides:
+    events:
+      disable_interval_events: true
+  environments:
+    - env_ids: [0]
+      name: "x_velocity_capability"
+      sweep:
+        interval: 5.0
+        commands:
+          base_velocity:
+            lin_vel_x: [0.1, 0.2, 0.3, 0.4, 0.5, 0.4, 0.2, 0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.4, -0.2, 0.0]
+            lin_vel_y: 0.0
+            ang_vel_z: 0.0
+    - env_ids: [1]
+      name: "y_velocity_capability"
+      sweep:
+        interval: 5.0
+        commands:
+          base_velocity:
+            lin_vel_x: 0.0
+            lin_vel_y: [0.1, 0.2, 0.3, 0.4, 0.5, 0.4, 0.2, 0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.4, -0.2, 0.0]
+            ang_vel_z: 0.0
+    - env_ids: [2]
+      name: "yaw_rate_capability"
+      sweep:
+        interval: 5.0
+        commands:
+          base_velocity:
+            lin_vel_x: 0.0
+            lin_vel_y: 0.0
+            ang_vel_z: [0.1, 0.2, 0.3, 0.4, 0.5, 0.4, 0.2, 0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.4, -0.2, 0.0]
+    - env_ids: [3]
+      name: "standing"
+      sweep:
+        interval: 5.0
+        commands:
+          base_velocity:
+            lin_vel_x: 0.0
+            lin_vel_y: 0.0
+            ang_vel_z: 0.0

@@ -222,10 +222,90 @@ python scripts/train.py \
 ```bash
 python scripts/eval.py \
   --task Velocity-HU-D03-History-v0 \
-  --num_envs 32 \
   --headless \
-  --checkpoint /absolute/path/to/model_5000.pt
+  --seed 42 \
+  --checkpoint /absolute/path/to/model_5000.pt \
+  --run_evaluation \
+  --eval_config agile/algorithms/evaluation/configs/hu_d03_velocity_eval.yaml \
+  --metrics_file /absolute/path/to/eval_metrics.json
 ```
+
+该评估配置固定使用 4 个环境、100 秒 episode，分别统计受控下半身和默认位姿保持的
+上半身关节，并关闭训练阶段的随机推力事件。评估成功表示 episode 完整存活；速度
+跟踪误差和关节动态指标仍需结合 `eval_metrics.json` 判断。
+
+### 2026-07-31 本机仿真基线
+
+此前阶段推荐 checkpoint 是：
+
+```text
+logs/rsl_rl/velocity_hu_d03_lower/2026-07-31_13-27-57_mixed_recovery_from_1000/model_1250.pt
+```
+
+在 seed 42 的固定 4 环境 × 100 秒评估中，x、y 和静止工况完整存活，yaw 工况在
+1.16 秒终止，成功率为 75%。成功 episode 的受控下肢平均关节加速度为 0.532，
+完整指标和唯一环境轨迹归档在同一 run 的
+`evaluation/seed42_fixed_4x100s/`。该结果尚未通过纯 yaw 工况，不能描述为完整速度
+能力通过，也不能进入真机阶段。
+
+评估器在 `num_episodes=1` 时只接受每个物理环境的首次 episode；失败环境 reset 后
+的重复终止不会增加完成数或覆盖该环境的首次轨迹。
+
+两个后续实验没有升格为推荐模型：将训练 yaw 范围缩到 ±0.5 后仍为 75%，yaw
+仅延长到 1.36 秒且下肢平均关节加速度恶化到 1.036；启用足部 yaw 正则的默认
+转向降权后降为 50%，x/yaw 分别在 1.76/1.14 秒终止。两者的指标分别归档在
+对应 `yaw_half_range_from_1250` 和 `command_aware_feet_yaw_from_1250` run 中。
+
+### 2026-07-31 零吊挂前进行走进展
+
+当前仿真推荐 checkpoint 已更新为：
+
+```text
+logs/rsl_rl/velocity_hu_d03_lower/2026-07-31_17-33-33_phase_residual_mixed50_yaw_from1100/model_1200.pt
+```
+
+它来自实验任务
+`Velocity-HU-D03-History-Bootstrap-Phase-Residual-Harness-Mixed-v0`。训练批次中
+50% 环境完全无吊挂，另外 50% 保留 27% 虚拟辅助；评估时会删除吊挂动作和训练
+扰动。控制器是确定性反相步态参考加 14 维学习残差的混合方案，不应描述为纯
+端到端 RL。
+
+seed 42、单环境、固定 `vx=0.45 m/s`、`vy=0`、`yaw_rate=0` 的 30 秒无吊挂评估中，
+原始 checkpoint 完整存活，平均平面速度误差为 0.1429，平均绝对 yaw-rate 误差为
+0.4084。左右髋、膝关节相关系数分别为 -0.708 和 -0.615，证明不是原地站立，而是
+持续交替行走。
+
+评估时增加 `--phase_yaw_amplitude 0.10` 的步频同步双髋 yaw 前馈后仍完整存活
+1500 帧，平均平面速度误差为 0.1516，平均绝对 yaw-rate 误差降至 0.2909，机身高度
+范围为 0.876–0.998 m，左右髋/膝相关系数为 -0.711/-0.680。完整指标和轨迹位于：
+
+```text
+/tmp/hu_d03_eval_model1200_yawphase010_30s/
+```
+
+复现命令：
+
+```bash
+python scripts/eval.py \
+  --task Velocity-HU-D03-History-Bootstrap-Phase-Residual-Harness-Mixed-v0 \
+  --checkpoint logs/rsl_rl/velocity_hu_d03_lower/2026-07-31_17-33-33_phase_residual_mixed50_yaw_from1100/model_1200.pt \
+  --num_envs 1 \
+  --headless \
+  --run_evaluation \
+  --eval_config agile/algorithms/evaluation/configs/hu_d03_forward_eval.yaml \
+  --metrics_file /tmp/hu_d03_eval_model1200_yawphase010_30s/metrics.json \
+  --save_trajectories \
+  --phase_yaw_amplitude 0.10
+```
+
+该结果首次证明零吊挂、固定前进指令下可持续行走 30 秒，但仍未通过
+`mean_yaw_rate_error <= 0.15`，加前馈后的线速度误差也以 0.0016 超过 0.15。
+因此不得称为完整前进跟踪验收通过，更不能进入 sim-to-real。
+
+不要升级两个失败后继模型：将 yaw L2 权重增至 -20 的
+`2026-07-31_17-38-38_phase_residual_mixed50_yaw20_from1200/model_1299.pt`
+在 7.40 秒摔倒；在 0.10 rad yaw 前馈下继续适配的
+`2026-07-31_17-55-54_phase_yawff010_from1200/model_1299.pt` 在 13.48 秒摔倒。
 
 每次重要实验至少保留：
 

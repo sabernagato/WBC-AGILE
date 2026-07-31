@@ -1,0 +1,22 @@
+# Deterministic HU_D03 forward-walking acceptance test.
+evaluation:
+  task_name: "Velocity-HU-D03-History-v0"
+  num_envs: 1
+  episode_length_s: 30.0
+  num_episodes: 1
+  success_criteria:
+    mean_lin_vel_xy_error: 0.15
+    mean_yaw_rate_error: 0.15
+  env_overrides:
+    events:
+      disable_interval_events: true
+  environments:
+    - env_ids: [0]
+      name: "forward_0p45_mps"
+      schedule:
+        - time: 0.0
+          commands:
+            base_velocity:
+              lin_vel_x: 0.45
+              lin_vel_y: 0.0
+              ang_vel_z: 0.0

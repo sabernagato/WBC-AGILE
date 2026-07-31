@@ -73,6 +73,15 @@ class HarnessAction(ActionTerm):
 
         self._root_id, _ = self._asset.find_bodies(cfg.root_name)
         self._is_disabled = False
+        if not 0.0 <= cfg.unassisted_env_fraction <= 1.0:
+            raise ValueError("unassisted_env_fraction must be in [0, 1].")
+        self._env_force_scale = torch.ones(self.num_envs, 1, device=self.device)
+        num_unassisted = round(cfg.unassisted_env_fraction * self.num_envs)
+        self._env_force_scale[:num_unassisted] = 0.0
+        if num_unassisted:
+            print(
+                f"[INFO] HarnessAction: {num_unassisted}/{self.num_envs} environments are unassisted."
+            )
 
     @property
     def action_dim(self) -> int:
@@ -130,6 +139,7 @@ class HarnessAction(ActionTerm):
         torque = self.stiffness_torques * error - self.damping_torques * self._asset.data.root_ang_vel_b
         torque[:, 2] = 0.0  # No yaw assistance from stabilization
         torque = torch.clamp(torque, -self._torque_limit, self._torque_limit)
+        torque *= self._env_force_scale
 
         return torque.view(self.num_envs, 1, 3)
 
@@ -157,6 +167,7 @@ class HarnessAction(ActionTerm):
         # PD control
         force_z = self.stiffness_forces * height_error - self.damping_forces * z_velocity
         force_z = torch.clamp(force_z, -self._force_limit, self._force_limit)
+        force_z *= self._env_force_scale
 
         # Return as [N, 1, 3]
         forces = torch.zeros(self.num_envs, 1, 3, device=self.device)

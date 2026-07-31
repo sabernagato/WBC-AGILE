@@ -47,6 +47,7 @@ ARM_JOINT_NAMES = [".*_shoulder_.*_joint", ".*_elbow_joint"]
 WRIST_JOINT_NAMES = [".*_wrist_.*_joint", ".*_hand_yaw_joint"]
 HEAD_JOINT_NAMES = ["head_.*_joint"]
 CONTROLLED_JOINT_NAMES = LEG_JOINT_NAMES + ["waist_roll_joint", "waist_pitch_joint"]
+UPPER_BODY_HOLD_JOINT_NAMES = ["waist_yaw_joint"] + ARM_JOINT_NAMES + WRIST_JOINT_NAMES + HEAD_JOINT_NAMES
 
 FEET_LINK_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 DEFAULT_BASE_HEIGHT = 0.92

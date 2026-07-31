@@ -40,6 +40,10 @@ class UniformNullVelocityCommand(UniformVelocityCommand):
 
     def __init__(self, cfg: UniformNullVelocityCommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
+        if not 0.0 <= cfg.rel_single_axis_envs <= 1.0:
+            raise ValueError(
+                f"rel_single_axis_envs must be in [0, 1], got {cfg.rel_single_axis_envs}"
+            )
         self.metrics_cumulative: dict[str, torch.Tensor] = {}
         for k, v in self.metrics.items():  # type: ignore
             if "xy" in k:
@@ -106,9 +110,24 @@ class UniformNullVelocityCommand(UniformVelocityCommand):
         self.traveled_distance[env_ids] += torch.norm(current_positions - self.start_positions[env_ids], dim=1)
         self.start_positions[env_ids] = current_positions.clone()
 
-        # set small velocity samples to zer
-        too_small = self.vel_command_b.norm(dim=1) < self.min_vel_norm
-        self.vel_command_b[too_small] = 0
+        env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if self.cfg.rel_single_axis_envs > 0.0 and len(env_ids_tensor) > 0:
+            sampled_commands = self.vel_command_b[env_ids_tensor]
+            moving_local_ids = torch.nonzero(sampled_commands.norm(dim=1) > 0.0, as_tuple=False).squeeze(-1)
+            if len(moving_local_ids) > 0:
+                use_single_axis = torch.rand(len(moving_local_ids), device=self.device) < self.cfg.rel_single_axis_envs
+                selected_local_ids = moving_local_ids[use_single_axis]
+                if len(selected_local_ids) > 0:
+                    selected_env_ids = env_ids_tensor[selected_local_ids]
+                    selected_axes = torch.randint(0, 3, (len(selected_env_ids),), device=self.device)
+                    selected_values = self.vel_command_b[selected_env_ids, selected_axes].clone()
+                    self.vel_command_b[selected_env_ids] = 0.0
+                    self.vel_command_b[selected_env_ids, selected_axes] = selected_values
+
+        # Set small velocity samples to zero, including single-axis commands
+        # whose retained component is below the threshold.
+        too_small = self.vel_command_b[env_ids_tensor].norm(dim=1) < self.min_vel_norm
+        self.vel_command_b[env_ids_tensor[too_small]] = 0.0
 
 
 class UniformVelocityBaseHeightCommand(UniformNullVelocityCommand):
