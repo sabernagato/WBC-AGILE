@@ -43,6 +43,7 @@ class MotionMetricsAnalyzer:
         max_episode_length: int = 0,
         joint_groups: dict[str, list[int]] | None = None,
         verbose: bool = False,
+        success_criteria: dict[str, float] | None = None,
     ):
         """Initialize a new smoothness measures calculator.
 
@@ -52,13 +53,18 @@ class MotionMetricsAnalyzer:
             joint_groups: Dictionary mapping group names to lists of joint indices
                           Example: {'upper_body': [0, 1, 2], 'lower_body': [3, 4, 5]}
             verbose: Whether to print detailed debug information
+            success_criteria: Optional maximum thresholds for registered episode metrics.
+                              An episode must survive and satisfy every threshold to succeed.
         """
         self.num_envs_evaluated = 0
+        self.num_envs_survived = 0
         self.num_envs_successful = 0
+        self.survival_rate = 0.0
         self.success_rate = 0.0
         self.max_episode_length = max_episode_length
         self.joint_groups = joint_groups or {}
         self.verbose = verbose
+        self.success_criteria = success_criteria or {}
 
         # Print joint groups for debugging
         if self.joint_groups and self.verbose:
@@ -82,6 +88,10 @@ class MotionMetricsAnalyzer:
         # Register default metrics
         self._register_default_metrics()
 
+        unknown_criteria = set(self.success_criteria) - set(self._compute_functions)
+        if unknown_criteria:
+            raise ValueError(f"Unknown success criteria metrics: {sorted(unknown_criteria)}")
+
         # Cache for processed tensor data to avoid redundant calculations
         self._tensor_cache = {}
 
@@ -99,7 +109,10 @@ class MotionMetricsAnalyzer:
 
         # Non-joint metrics that don't make sense for body parts
         base_non_joint_metrics = {
-            # Example for future metrics:
+            "mean_lin_vel_xy_error": self._compute_mean_lin_vel_xy_error,
+            "mean_yaw_rate_error": self._compute_mean_yaw_rate_error,
+            "mean_commanded_lin_speed": self._compute_mean_commanded_lin_speed,
+            "mean_achieved_lin_speed": self._compute_mean_achieved_lin_speed,
         }
 
         # Combined metrics dictionary with all metrics
@@ -220,13 +233,40 @@ class MotionMetricsAnalyzer:
         # Store compute function
         self._compute_functions[name] = compute_fn
 
-    def update(self, terminated_data: dict[str, Any]):
+    def _compute_success_mask(self, terminated_data: dict[str, Any]) -> torch.Tensor:
+        """Return per-episode success: full survival plus configured metric thresholds."""
+        frame_counts = terminated_data["frame_counts"]
+        if self.max_episode_length <= 0:
+            return torch.zeros_like(frame_counts, dtype=torch.bool)
+
+        success_mask = frame_counts == self.max_episode_length
+        if not self.success_criteria:
+            return success_mask
+
+        for env_idx in range(frame_counts.shape[0]):
+            if not success_mask[env_idx]:
+                continue
+            env_data = {
+                "env_idx": env_idx,
+                "num_frames": int(frame_counts[env_idx].item()),
+            }
+            for metric_name, max_value in self.success_criteria.items():
+                value, weight = self._compute_functions[metric_name](terminated_data, env_data.copy())
+                if value is None or weight <= 0 or not np.isfinite(value) or value > max_value:
+                    success_mask[env_idx] = False
+                    break
+        return success_mask
+
+    def update(self, terminated_data: dict[str, Any]) -> torch.Tensor | None:
         """Update metrics with data from terminated environments.
 
         Args:
             terminated_data: Dictionary of trajectory data for terminated environments,
                              including 'frame_counts' tensor indicating valid frame counts
                              for each environment
+
+        Returns:
+            Boolean success mask for the terminated episodes, or None when no data is provided.
         """
         if not terminated_data or "frame_counts" not in terminated_data:
             return
@@ -241,20 +281,11 @@ class MotionMetricsAnalyzer:
         # Clear tensor cache to prevent memory build-up
         self._tensor_cache.clear()
 
+        survival_mask = frame_counts == self.max_episode_length
+        success_mask = self._compute_success_mask(terminated_data)
         self.num_envs_evaluated += num_terminated
-
-        # Identify successful environments (those that reached max episode length)
-        if self.max_episode_length > 0:
-            success_mask = frame_counts == self.max_episode_length
-
-            # Handle scalar case (single terminated env)
-            if success_mask.dim() == 0:
-                num_success = 1 if success_mask.item() else 0
-            else:
-                success_indices = torch.nonzero(success_mask).squeeze(-1)
-                num_success = success_indices.numel()
-
-            self.num_envs_successful += num_success
+        self.num_envs_survived += int(survival_mask.sum().item())
+        self.num_envs_successful += int(success_mask.sum().item())
 
         # Compute and store metrics for all terminated environments
         for env_idx in range(num_terminated):
@@ -266,10 +297,12 @@ class MotionMetricsAnalyzer:
                 self._compute_and_store_env_metrics(terminated_data, env_idx, num_frames, self._metrics_data)
 
                 # Also store metrics for successful environments
-                if self.max_episode_length > 0 and num_frames == self.max_episode_length:
+                if success_mask[env_idx]:
                     self._compute_and_store_env_metrics(
                         terminated_data, env_idx, num_frames, self._success_metrics_data
                     )
+
+        return success_mask
 
     def _compute_and_store_env_metrics(
         self,
@@ -318,8 +351,10 @@ class MotionMetricsAnalyzer:
 
         # Calculate success rate
         if self.num_envs_evaluated > 0:
+            self.survival_rate = self.num_envs_survived / self.num_envs_evaluated
             self.success_rate = self.num_envs_successful / self.num_envs_evaluated
         else:
+            self.survival_rate = 0.0
             self.success_rate = 0.0
 
         # Compute weighted averages for successful episodes
@@ -339,6 +374,7 @@ class MotionMetricsAnalyzer:
             metrics_per_line: Number of metrics to display per line (default: 6)
         """
         print(f"Number of environments evaluated: {self.num_envs_evaluated}")
+        print(f"Survival Rate: {self.survival_rate:.2f}")
         print(f"Success Rate: {self.success_rate:.2f}")
 
         # Pre-compute grouped metrics to avoid repetition
@@ -447,7 +483,9 @@ class MotionMetricsAnalyzer:
 
         content = {
             "num_environments": self.num_envs_evaluated,
+            "survival_rate": self.survival_rate,
             "success_rate": self.success_rate,
+            "success_criteria": self.success_criteria,
             "all": all_metrics_grouped,
             "success": success_metrics_grouped,
             "joint_groups": self.joint_groups,
@@ -480,12 +518,72 @@ class MotionMetricsAnalyzer:
             debug_info = {}
 
         return {
+            "survival_rate": self.survival_rate,
             "success_rate": self.success_rate,
+            "success_criteria": self.success_criteria,
             "metrics": all_metrics_grouped,
             "success_metrics": success_metrics_grouped,
             "joint_groups": self.joint_groups,
             **debug_info,
         }
+
+    def _compute_mean_lin_vel_xy_error(
+        self, full_data: dict[str, torch.Tensor], env_data: dict
+    ) -> tuple[float | None, float]:
+        """Compute mean planar velocity tracking error in the robot yaw frame."""
+        if "commands" not in full_data or "root_lin_vel_robot" not in full_data:
+            return None, 0
+        env_idx = env_data["env_idx"]
+        num_frames = env_data["num_frames"]
+        commands = full_data["commands"][:num_frames, env_idx, :2]
+        velocity = full_data["root_lin_vel_robot"][:num_frames, env_idx, :2]
+        if commands.numel() == 0 or velocity.numel() == 0:
+            return None, 0
+        error = torch.linalg.vector_norm(commands - velocity, dim=-1)
+        return torch.mean(error).item(), num_frames
+
+    def _compute_mean_yaw_rate_error(
+        self, full_data: dict[str, torch.Tensor], env_data: dict
+    ) -> tuple[float | None, float]:
+        """Compute mean absolute yaw-rate tracking error."""
+        if "commands" not in full_data or "root_ang_vel" not in full_data:
+            return None, 0
+        env_idx = env_data["env_idx"]
+        num_frames = env_data["num_frames"]
+        commands = full_data["commands"][:num_frames, env_idx]
+        velocity = full_data["root_ang_vel"][:num_frames, env_idx]
+        if commands.numel() == 0 or commands.shape[-1] < 3 or velocity.shape[-1] < 3:
+            return None, 0
+        error = torch.abs(commands[..., 2] - velocity[..., 2])
+        return torch.mean(error).item(), num_frames
+
+    def _compute_mean_commanded_lin_speed(
+        self, full_data: dict[str, torch.Tensor], env_data: dict
+    ) -> tuple[float | None, float]:
+        """Compute mean commanded planar speed."""
+        if "commands" not in full_data:
+            return None, 0
+        env_idx = env_data["env_idx"]
+        num_frames = env_data["num_frames"]
+        commands = full_data["commands"][:num_frames, env_idx, :2]
+        if commands.numel() == 0:
+            return None, 0
+        speed = torch.linalg.vector_norm(commands, dim=-1)
+        return torch.mean(speed).item(), num_frames
+
+    def _compute_mean_achieved_lin_speed(
+        self, full_data: dict[str, torch.Tensor], env_data: dict
+    ) -> tuple[float | None, float]:
+        """Compute mean achieved planar speed in the robot yaw frame."""
+        if "root_lin_vel_robot" not in full_data:
+            return None, 0
+        env_idx = env_data["env_idx"]
+        num_frames = env_data["num_frames"]
+        velocity = full_data["root_lin_vel_robot"][:num_frames, env_idx, :2]
+        if velocity.numel() == 0:
+            return None, 0
+        speed = torch.linalg.vector_norm(velocity, dim=-1)
+        return torch.mean(speed).item(), num_frames
 
     def _compute_mean_joint_acc(self, full_data: dict[str, torch.Tensor], env_data: dict) -> tuple[float, float]:
         """Compute mean joint acceleration magnitude.

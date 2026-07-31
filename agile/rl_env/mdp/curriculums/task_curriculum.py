@@ -516,9 +516,10 @@ class adaptive_force_decay(ManagerTermBase):
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        self._force_scale: float = 1.0
         self._action = env.action_manager._terms[cfg.params["action_name"]]
         self._scale_method: str = cfg.params.get("scale_method", "scale_forces")
+        self._force_scale = float(cfg.params.get("initial_scale", 1.0))
+        getattr(self._action, self._scale_method)(self._force_scale)
 
         decay_when = cfg.params.get("decay_when", "above")
         self._ema: float = 0.0 if decay_when == "above" else 1.0
@@ -537,6 +538,7 @@ class adaptive_force_decay(ManagerTermBase):
         ema_alpha: float = 0.01,
         decay: float = 0.999,
         disable_threshold: float = 0.01,
+        initial_scale: float = 1.0,  # noqa: ARG002
         # Metric-specific (used at init or by specific metrics)
         command_name: str | None = None,  # noqa: ARG002
         standing_height_threshold: float = 0.7,
@@ -563,6 +565,7 @@ class adaptive_force_decay(ManagerTermBase):
             ema_alpha: EMA smoothing factor. Smaller = smoother.
             decay: Multiplicative decay per step. Scale ``*= decay``.
             disable_threshold: Set scale to 0 when it drops below this.
+            initial_scale: Initial assistance scale applied when the curriculum is created.
             command_name: Command term name (used at init for error metrics).
             standing_height_threshold: Min height to count as standing
                 (``"standing_ratio"`` only).

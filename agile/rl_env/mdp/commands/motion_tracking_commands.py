@@ -75,6 +75,9 @@ class MotionCommand(CommandTerm):
             self.cfg.motion_file,
             body_indices=npz_body_indices,
             joint_remap_idx=joint_remap_idx,
+            source_joint_names=self.cfg.motion_joint_names,
+            source_body_names=self.cfg.motion_body_names,
+            require_name_metadata=self.cfg.require_name_metadata,
             device=self.device,
         )
 

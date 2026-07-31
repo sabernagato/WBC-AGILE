@@ -68,6 +68,9 @@ python scripts/eval.py --task Velocity-T1-v0 --num_envs 32 --checkpoint <path>
 
 See the [full documentation](https://nvidia-isaac.github.io/WBC-AGILE/) for installation details, training guides, task descriptions, and deployment instructions.
 
+For this fork's HU_D03 setup on a new training machine, start with the
+[HU_D03 agent handoff](HU_D03_AGENT_HANDOFF.md).
+
 ## Office Hour and FAQ
 
 We hosted a robotics livestream office hour providing an in-depth walkthrough of the AGILE framework.

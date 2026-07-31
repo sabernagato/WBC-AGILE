@@ -124,6 +124,215 @@ class TestRewardsBase(unittest.TestCase):
 
 
 @unittest.skipIf(not APP_IS_READY, "App is not ready")
+class TestAlignedLinearVelocityReward(TestRewardsBase):
+    """The gait-bootstrap reward must reject standing and backwards motion."""
+
+    def test_direction_and_tracking_error_both_affect_reward(self) -> None:
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [[0.45, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+        self.robot.data.root_lin_vel_w = torch.tensor(
+            [[0.0, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+
+        reward = mdp.track_lin_vel_xy_yaw_frame_exp_aligned(
+            self.env, std=0.5, command_name="base_velocity"
+        )
+
+        torch.testing.assert_close(reward, torch.tensor([0.0, 1.0], device=self.device))
+
+        self.robot.data.root_lin_vel_w = torch.tensor(
+            [[-0.45, 0.0, 0.0], [0.225, 0.0, 0.0]], device=self.device
+        )
+        reward = mdp.track_lin_vel_xy_yaw_frame_exp_aligned(
+            self.env, std=0.5, command_name="base_velocity"
+        )
+
+        expected = torch.tensor(
+            [
+                -torch.exp(torch.tensor(-(0.9**2) / 0.5**2)),
+                torch.exp(torch.tensor(-(0.225**2) / 0.5**2)),
+            ],
+            device=self.device,
+        )
+        torch.testing.assert_close(reward, expected)
+
+
+@unittest.skipIf(not APP_IS_READY, "App is not ready")
+class TestBipedGaitPhaseReward(TestRewardsBase):
+    """The gait clock must require alternating load, contact, and clearance."""
+
+    def test_phase_matched_load_is_positive_and_opposite_load_is_negative(self) -> None:
+        self.env.step_dt = 0.02
+        self.env.episode_length_buf = torch.tensor([10, 30], device=self.device)
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [[0.45, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+        self.contact_sensor.data.net_forces_w = torch.tensor(
+            [
+                [[0.0, 0.0, 100.0], [0.0, 0.0, 0.0]],
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+            ],
+            device=self.device,
+        )
+
+        phase = mdp.gait_phase(self.env, frequency=1.25)
+        reward = mdp.biped_gait_load_transfer(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            sensor_cfg=self.sensor_cfg,
+        )
+
+        expected_phase = torch.tensor([[1.0, 0.0], [-1.0, 0.0]], device=self.device)
+        torch.testing.assert_close(phase, expected_phase, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(reward, torch.ones(2, device=self.device))
+
+        self.contact_sensor.data.net_forces_w = self.contact_sensor.data.net_forces_w.flip(1)
+        reward = mdp.biped_gait_load_transfer(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            sensor_cfg=self.sensor_cfg,
+        )
+        torch.testing.assert_close(reward, -torch.ones(2, device=self.device))
+
+    def test_double_support_is_neutral_and_single_support_must_match_phase(self) -> None:
+        self.env.step_dt = 0.02
+        self.env.episode_length_buf = torch.tensor([10, 30], device=self.device)
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [[0.45, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+        self.contact_sensor.data.net_forces_w = torch.tensor(
+            [
+                [[0.0, 0.0, 100.0], [0.0, 0.0, 100.0]],
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+            ],
+            device=self.device,
+        )
+
+        reward = mdp.biped_gait_contact_schedule(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            sensor_cfg=self.sensor_cfg,
+        )
+        torch.testing.assert_close(reward, torch.tensor([0.0, 1.0], device=self.device))
+
+        self.contact_sensor.data.net_forces_w[1] = (
+            self.contact_sensor.data.net_forces_w[1].flip(0)
+        )
+        reward = mdp.biped_gait_contact_schedule(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            sensor_cfg=self.sensor_cfg,
+        )
+        torch.testing.assert_close(reward, torch.tensor([0.0, -1.0], device=self.device))
+
+    def test_level_feet_are_neutral_and_swing_clearance_must_match_phase(self) -> None:
+        self.env.step_dt = 0.02
+        self.env.episode_length_buf = torch.tensor([10, 30], device=self.device)
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [[0.45, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+        self.robot.data.body_pos_w = torch.tensor(
+            [
+                [[0.0, 0.1, 0.0], [0.0, -0.1, 0.0]],
+                [[0.0, 0.1, 0.08], [0.0, -0.1, 0.0]],
+            ],
+            device=self.device,
+        )
+        asset_cfg = MagicMock()
+        asset_cfg.name = "robot"
+        asset_cfg.body_ids = torch.tensor([0, 1], device=self.device)
+
+        reward = mdp.biped_gait_foot_clearance(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            target_clearance=0.08,
+            std=0.06,
+            asset_cfg=asset_cfg,
+        )
+        self.assertAlmostEqual(reward[0].item(), 0.0, places=6)
+        self.assertGreater(reward[1].item(), 0.8)
+
+        self.robot.data.body_pos_w[1, :, 2] = self.robot.data.body_pos_w[1, :, 2].flip(0)
+        opposite_reward = mdp.biped_gait_foot_clearance(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            target_clearance=0.08,
+            std=0.06,
+            asset_cfg=asset_cfg,
+        )
+        self.assertLess(opposite_reward[1].item(), 0.0)
+
+    def test_joint_reference_is_neutral_when_standing_and_rewards_antiphase_pose(self) -> None:
+        self.env.step_dt = 0.02
+        self.env.episode_length_buf = torch.tensor([10, 30], device=self.device)
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [[0.45, 0.0, 0.0], [0.45, 0.0, 0.0]], device=self.device
+        )
+        self.robot.data.joint_pos = torch.zeros((2, 6), device=self.device)
+        self.robot.data.default_joint_pos = torch.zeros((2, 6), device=self.device)
+        left_cfg = MagicMock(name="left_joint_cfg")
+        left_cfg.name = "robot"
+        left_cfg.joint_ids = torch.tensor([0, 1, 2], device=self.device)
+        right_cfg = MagicMock(name="right_joint_cfg")
+        right_cfg.name = "robot"
+        right_cfg.joint_ids = torch.tensor([3, 4, 5], device=self.device)
+
+        standing_reward = mdp.biped_gait_joint_reference(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            std=0.15,
+            left_joint_cfg=left_cfg,
+            right_joint_cfg=right_cfg,
+            hip_pitch_amplitude=0.25,
+            knee_amplitude=0.40,
+            ankle_pitch_amplitude=0.20,
+        )
+        torch.testing.assert_close(standing_reward, torch.zeros(2, device=self.device))
+
+        self.robot.data.joint_pos = torch.tensor(
+            [
+                [-0.25, 0.0, 0.0, 0.25, 0.40, -0.20],
+                [0.25, 0.40, -0.20, -0.25, 0.0, 0.0],
+            ],
+            device=self.device,
+        )
+        matched_reward = mdp.biped_gait_joint_reference(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            std=0.15,
+            left_joint_cfg=left_cfg,
+            right_joint_cfg=right_cfg,
+            hip_pitch_amplitude=0.25,
+            knee_amplitude=0.40,
+            ankle_pitch_amplitude=0.20,
+        )
+        self.assertTrue(torch.all(matched_reward > 0.8))
+
+        self.robot.data.joint_pos = self.robot.data.joint_pos.roll(3, dims=1)
+        opposite_reward = mdp.biped_gait_joint_reference(
+            self.env,
+            command_name="base_velocity",
+            frequency=1.25,
+            std=0.15,
+            left_joint_cfg=left_cfg,
+            right_joint_cfg=right_cfg,
+            hip_pitch_amplitude=0.25,
+            knee_amplitude=0.40,
+            ankle_pitch_amplitude=0.20,
+        )
+        self.assertTrue(torch.all(opposite_reward < 0.0))
+
+
+@unittest.skipIf(not APP_IS_READY, "App is not ready")
 class TestTrackBaseHeight(TestRewardsBase):
     """Test cases for the track_base_height reward function."""
 
@@ -311,6 +520,25 @@ class TestContactForcesL2(TestRewardsBase):
         # All forces are below the threshold, so expected is all zeros
         expected = torch.zeros(self.num_envs, device=self.device)
         torch.testing.assert_close(result, expected)
+
+
+@unittest.skipIf(not APP_IS_READY, "App is not ready")
+class TestYawRateTrackingPenalty(TestRewardsBase):
+    """Yaw-rate error shaping must remain informative for large errors."""
+
+    def test_returns_squared_command_error(self) -> None:
+        self.env.command_manager.get_command.return_value = torch.tensor(
+            [
+                [0.45, 0.0, 0.0],
+                [0.45, 0.0, 0.2],
+            ],
+            device=self.device,
+        )
+        self.robot.data.root_ang_vel_b = torch.tensor(
+            [[0.0, 0.0, 0.5], [0.0, 0.0, -0.1]], device=self.device
+        )
+        penalty = mdp.track_ang_vel_z_l2(self.env, command_name="base_velocity")
+        torch.testing.assert_close(penalty, torch.tensor([0.25, 0.09], device=self.device))
 
 
 if __name__ == "__main__":

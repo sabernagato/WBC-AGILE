@@ -51,6 +51,13 @@ class UniformNullVelocityCommandCfg(UniformVelocityCommandCfg):
     min_vel_norm: float = 0.1
     """Minimum velocity norm,velocity commands with a norm less than this value are set to 0"""
 
+    rel_single_axis_envs: float = 0.0
+    """Fraction of sampled commands constrained to exactly one of x, y, or yaw.
+
+    This is applied before the minimum velocity threshold and after standing
+    commands are sampled. A value of 0.0 preserves the original behavior.
+    """
+
 
 @configclass
 class UniformVelocityBaseHeightCommandCfg(UniformNullVelocityCommandCfg):

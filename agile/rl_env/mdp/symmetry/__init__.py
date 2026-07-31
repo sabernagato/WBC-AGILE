@@ -17,6 +17,7 @@
 """Symmetry functions for the G1 and T1 robots."""
 
 from .symmetry_g1 import lr_mirror_G1
+from .symmetry_g1 import lr_mirror_G1 as lr_mirror_HU_D03
 from .symmetry_t1 import lr_mirror_T1
 
-__all__ = ["lr_mirror_G1", "lr_mirror_T1"]
+__all__ = ["lr_mirror_G1", "lr_mirror_HU_D03", "lr_mirror_T1"]

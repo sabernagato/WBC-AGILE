@@ -31,6 +31,18 @@ from agile.isaaclab_extras.utils.io_descriptors import (
 from agile.rl_env.mdp.commands import UniformVelocityBaseHeightCommand
 
 
+@generic_io_descriptor(units="unit", observation_type="Command", on_inspect=[record_shape, record_dtype])  # type: ignore[arg-type]
+def gait_phase(env: ManagerBasedRLEnv, frequency: float) -> torch.Tensor:
+    """Return a deterministic sine/cosine gait clock reset with each episode."""
+    if hasattr(env, "episode_length_buf"):
+        steps = env.episode_length_buf.float()
+    else:
+        steps = torch.zeros(env.num_envs, device=env.device)
+
+    phase = 2.0 * torch.pi * frequency * steps * env.step_dt
+    return torch.stack((torch.sin(phase), torch.cos(phase)), dim=1)
+
+
 @generic_io_descriptor(  # type: ignore[arg-type]
     units="unit",
     observation_type="Environment",

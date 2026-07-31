@@ -1201,6 +1201,165 @@ def joint_deviation_exp_if_standing(
     return torch.sum(torch.exp(-torch.square(angle) / std**2), dim=1) * is_standing
 
 
+def biped_gait_load_transfer(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    frequency: float,
+    sensor_cfg: SceneEntityCfg,
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Reward alternating left/right vertical foot loading on a fixed gait clock.
+
+    Standing with equal loading and being fully airborne both receive zero. Loading
+    the phase-selected stance foot receives a positive reward, while loading the
+    opposite foot receives a negative reward. This supplies a dense bridge to the
+    existing single-stance air-time reward.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    feet_z_forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, 2].abs()
+    if feet_z_forces.shape[1] != 2:
+        raise ValueError(
+            f"biped_gait_load_transfer requires exactly two feet, got {feet_z_forces.shape[1]}"
+        )
+
+    total_force = feet_z_forces.sum(dim=1)
+    load_imbalance = (feet_z_forces[:, 0] - feet_z_forces[:, 1]) / (total_force + 1e-6)
+    has_support = (total_force > force_threshold).float()
+
+    phase = 2.0 * torch.pi * frequency * env.episode_length_buf.float() * env.step_dt
+    desired_imbalance = torch.sin(phase)
+    command_active = (
+        torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
+    ).float()
+    return load_imbalance * desired_imbalance * has_support * command_active
+
+
+def biped_gait_contact_schedule(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    frequency: float,
+    sensor_cfg: SceneEntityCfg,
+    force_threshold: float = 10.0,
+) -> torch.Tensor:
+    """Reward phase-matched single support and reject double-support shuffling.
+
+    Unlike the continuous load-transfer term, this term is zero when both feet
+    remain in contact. It becomes positive only when the scheduled stance foot
+    is in contact and the scheduled swing foot is not.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    feet_z_forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, 2].abs()
+    if feet_z_forces.shape[1] != 2:
+        raise ValueError(
+            f"biped_gait_contact_schedule requires exactly two feet, got {feet_z_forces.shape[1]}"
+        )
+
+    contacts = (feet_z_forces > force_threshold).float()
+    contact_imbalance = contacts[:, 0] - contacts[:, 1]
+    phase = 2.0 * torch.pi * frequency * env.episode_length_buf.float() * env.step_dt
+    desired_imbalance = torch.sin(phase)
+    command_active = (
+        torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
+    ).float()
+    return contact_imbalance * desired_imbalance * command_active
+
+
+def biped_gait_foot_clearance(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    frequency: float,
+    target_clearance: float,
+    std: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward alternating left/right foot height while making level feet neutral.
+
+    The target is a smooth signed height difference. Subtracting the score for
+    level feet prevents a double-support policy from receiving a positive
+    baseline merely by waiting for phase transitions.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_heights = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]
+    if foot_heights.shape[1] != 2:
+        raise ValueError(
+            f"biped_gait_foot_clearance requires exactly two feet, got {foot_heights.shape[1]}"
+        )
+
+    phase = 2.0 * torch.pi * frequency * env.episode_length_buf.float() * env.step_dt
+    desired_height_difference = -target_clearance * torch.sin(phase)
+    actual_height_difference = foot_heights[:, 0] - foot_heights[:, 1]
+    tracking_reward = torch.exp(
+        -torch.square(actual_height_difference - desired_height_difference) / std**2
+    )
+    level_feet_baseline = torch.exp(-torch.square(desired_height_difference) / std**2)
+    command_active = (
+        torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
+    ).float()
+    return (tracking_reward - level_feet_baseline) * command_active
+
+
+def biped_gait_joint_reference(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    frequency: float,
+    std: float,
+    left_joint_cfg: SceneEntityCfg,
+    right_joint_cfg: SceneEntityCfg,
+    hip_pitch_amplitude: float,
+    knee_amplitude: float,
+    ankle_pitch_amplitude: float,
+) -> torch.Tensor:
+    """Track a minimal anti-phase leg reference for gait bootstrapping.
+
+    The configured joint order must be hip pitch, knee, and ankle pitch for
+    each leg. Hip pitch follows a smooth anti-phase sinusoid, while knee and
+    ankle flex only during that leg's swing half-cycle. Subtracting the score
+    of the default pose makes standing neutral instead of rewarding it.
+    """
+    asset: Articulation = env.scene[left_joint_cfg.name]
+    left_pos = asset.data.joint_pos[:, left_joint_cfg.joint_ids]
+    right_pos = asset.data.joint_pos[:, right_joint_cfg.joint_ids]
+    if left_pos.shape[1] != 3 or right_pos.shape[1] != 3:
+        raise ValueError(
+            "biped_gait_joint_reference requires hip pitch, knee, and ankle pitch "
+            f"for each leg, got {left_pos.shape[1]} left and {right_pos.shape[1]} right"
+        )
+
+    left_rel = left_pos - asset.data.default_joint_pos[:, left_joint_cfg.joint_ids]
+    right_rel = right_pos - asset.data.default_joint_pos[:, right_joint_cfg.joint_ids]
+
+    phase = 2.0 * torch.pi * frequency * env.episode_length_buf.float() * env.step_dt
+    phase_sin = torch.sin(phase)
+    left_swing = torch.relu(-phase_sin)
+    right_swing = torch.relu(phase_sin)
+
+    left_target = torch.stack(
+        (
+            -hip_pitch_amplitude * phase_sin,
+            knee_amplitude * left_swing,
+            -ankle_pitch_amplitude * left_swing,
+        ),
+        dim=1,
+    )
+    right_target = torch.stack(
+        (
+            hip_pitch_amplitude * phase_sin,
+            knee_amplitude * right_swing,
+            -ankle_pitch_amplitude * right_swing,
+        ),
+        dim=1,
+    )
+
+    target = torch.cat((left_target, right_target), dim=1)
+    actual = torch.cat((left_rel, right_rel), dim=1)
+    tracking_reward = torch.exp(-torch.mean(torch.square(actual - target), dim=1) / std**2)
+    default_pose_baseline = torch.exp(-torch.mean(torch.square(target), dim=1) / std**2)
+    command_active = (
+        torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
+    ).float()
+    return (tracking_reward - default_pose_baseline) * command_active
+
+
 def feet_air_time_positive_biped_command(
     env: ManagerBasedRLEnv, command_name: str, command_slice: slice, threshold: float, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:

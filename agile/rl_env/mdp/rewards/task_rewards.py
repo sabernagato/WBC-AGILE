@@ -454,6 +454,17 @@ def track_lin_vel_xy_yaw_frame_exp_aligned(
     return reward
 
 
+def track_ang_vel_z_l2(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize squared yaw-rate tracking error without exponential saturation."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)[:, 2]
+    return torch.square(command - asset.data.root_ang_vel_b[:, 2])
+
+
 def vel_xy_in_threshold(
     env: ManagerBasedRLEnv, command_name: str, threshold: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:

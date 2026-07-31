@@ -18,6 +18,7 @@ agile/rl_env/assets/unitree_mujoco/
 *IO_descriptors.yaml
 
 fallen_states_cache/
+motions/*.npz
 
 .venv/
 uv.lock

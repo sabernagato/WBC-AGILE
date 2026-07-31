@@ -56,6 +56,13 @@ class MotionCommandCfg(CommandTermCfg):
     differs from the simulation robot (e.g. USD).  When ``None`` (default)
     the motion file is assumed to share the robot's body ordering."""
 
+    require_name_metadata: bool = False
+    """Require ``joint_names`` and ``body_names`` arrays in the motion file.
+
+    Legacy motion files omit these arrays, so this remains disabled by default.
+    Robot integrations with non-interchangeable joint layouts should enable it
+    to fail fast instead of silently applying an incorrect ordering."""
+
     pose_range: dict[str, tuple[float, float]] = {}
     velocity_range: dict[str, tuple[float, float]] = {}
 

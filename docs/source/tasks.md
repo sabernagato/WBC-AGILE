@@ -90,6 +90,7 @@ the pick & place task freezes a trained locomotion policy and layers upper-body 
 |---------|-------|-------------------|----------|--------------|
 | `Velocity-T1-v0` | Booster T1 | Legs (12 joints) | Velocity (x, y, yaw) | History (5 steps) |
 | `Velocity-G1-History-v0` | Unitree G1 | Legs + Waist Roll/Pitch (14 joints) | Velocity (x, y, yaw) | History (5 steps) |
+| `Velocity-HU-D03-History-v0` | HU_D03 | Legs + Waist Roll/Pitch (14 joints) | Velocity (x, y, yaw) | History (5 steps) |
 
 Both robots use the **Delayed DC Motor** actuator model, which adds realistic communication
 delay between the policy output and joint actuation.
@@ -157,6 +158,7 @@ whole-body movements are essential for recovery.
 | Task ID | Robot | Controlled Joints | Commands | Observations |
 |---------|-------|-------------------|----------|--------------|
 | `StandUp-T1-v0` | Booster T1 | Full body (all joints) | None | History (5 steps) |
+| `StandUp-HU-D03-v0` | HU_D03 | Full body (31 joints) | None | History (5 steps) |
 
 **Key features**:
 
@@ -169,6 +171,9 @@ whole-body movements are essential for recovery.
   which is gradually removed via curriculum learning.
 - **`pre_learn` hook**: The fallen state collection runs automatically before training
   begins via a registered `pre_learn_entry_point`.
+- **HU_D03 staged poses**: HU_D03 starts with mostly supine states, then increases
+  arbitrary-orientation and randomized-joint resets to cover prone and side-lying
+  recovery as the terrain curriculum progresses.
 
 ```python
 # Configuration in agents/rsl_rl_ppo_cfg.py
@@ -222,19 +227,21 @@ to track reference motion trajectories.
 </table>
 
 The robot learns to imitate whole-body reference motions (e.g., dancing) loaded from motion
-capture data. Unlike the modular lower/upper split used in locomotion tasks, this task uses
-**unified full-body control** over all 29 joints to track body positions, orientations,
-and velocities from a reference trajectory.
+capture data. Unlike the modular lower/upper split used in locomotion tasks, these tasks use
+**unified full-body control** to track body positions, orientations, and velocities from a
+reference trajectory.
 
 | Task ID | Robot | Controlled Joints | Commands | Observations |
 |---------|-------|-------------------|----------|--------------|
 | `Tracking-Flat-G1-v0` | Unitree G1 | Full body (29 joints) | Motion tracking | Single frame (no history) |
+| `Tracking-Flat-HU-D03-v0` | HU_D03 | Full body (31 joints) | Motion tracking | Single frame (no history) |
 
 **Key features**:
 
 - **No curriculum**: Trains at full difficulty from the start, no harness, no reward ramps.
 - **No recurrence or history**: Pure reactive MLP policy operating on a single frame.
-- **BeyondMimic actuator model**: Uses system-identified motor parameters with no actuator delay.
+- **Robot-specific actuator model**: G1 uses identified BeyondMimic parameters; HU_D03 uses
+  the fork's conservative delayed-DC training defaults until hardware identification is complete.
 - **Anchor-relative tracking**: Rewards track body poses relative to a torso anchor, plus global anchor position and orientation.
 
 ```{note}
@@ -242,6 +249,11 @@ Due to licensing constraints, we do not include the pre-trained tracking checkpo
 reference motion data in this repository. To obtain motion reference data for the Unitree G1,
 see the [AMASS Retargeted for G1](https://huggingface.co/datasets/ember-lab-berkeley/AMASS_Retargeted_for_G1/tree/main)
 dataset on Hugging Face. We provide a utility script `scripts/utils/convert_retargeted_data_for_tracking.py` to convert this downloaded data into a format ready for training.
+
+G1 clips cannot be used directly for HU_D03 because the joint names, wrist axes, head
+joints, body geometry, and ordering differ. For HU_D03, generate the included integration
+clip or retarget a source motion to the canonical 31-joint contract, then run
+`scripts/validate_hu_d03_motion.py` before training. See {doc}`hu-d03` for commands.
 ```
 
 ### Debug

@@ -38,6 +38,10 @@ def mirror_velocity_commands(actions: torch.Tensor, env: ManagerBasedRLEnv) -> t
 
     return mirrored_actions
 
+def mirror_gait_phase(obs: torch.Tensor, env: ManagerBasedRLEnv) -> torch.Tensor:  # noqa: ARG001
+    """Shift the sine/cosine gait clock by half a cycle when swapping legs."""
+    return -obs
+
 
 def lr_mirror_projected_gravity(obs: torch.Tensor, env: ManagerBasedRLEnv) -> torch.Tensor:  # noqa: ARG001
     """Mirror the projected gravity.
